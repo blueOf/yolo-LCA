@@ -1,0 +1,9 @@
+LICENSE
+README.md
+setup.py
+PyNvJpeg.egg-info/PKG-INFO
+PyNvJpeg.egg-info/SOURCES.txt
+PyNvJpeg.egg-info/dependency_links.txt
+PyNvJpeg.egg-info/top_level.txt
+nvjpeg/__init__.py
+src/wrapper.cpp

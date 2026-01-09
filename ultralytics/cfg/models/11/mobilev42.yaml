@@ -1,0 +1,47 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# YOLOv10 object detection model. For Usage examples see https://docs.ultralytics.com/tasks/detect
+
+# Parameters
+
+#添加了最后一个卷积通道的通道数目
+
+nc: 4 # number of classes
+scales: # model compound scaling constants, i.e. 'model=yolov10n.yaml' will call yolov10.yaml with scale 'n'
+  # [depth, width, max_channels]
+  l: [1.00, 1.00, 2048]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, ConvBnAct, [32, 3, 2]] # 0-P1/2 640-320
+  - [-1, 1, EdgeResidual, [32, 3, 2]] # 1-P2/4 320-160
+  - [-1, 1, EdgeResidual, [128, 3,2,1,0,0,False,1.5]] # 160-80
+  - [-1, 1, UniversalInvertedResidual, [96, 5, 5,0,2,1,1,False,1.5]] # 3-P3/8 80-40
+  - [-1, 1, UniversalInvertedResidual, [96, 0, 3,0,1,1,1,False,1.5]]
+  - [-1, 1, UniversalInvertedResidual, [256, 3, 0,0,1,1,1,False,3]]
+  - [-1, 1, UniversalInvertedResidual, [128, 3, 3,0,2,1,1,False,3.5]] #40-20
+  - [-1, 1, UniversalInvertedResidual, [128, 5, 5,0,1,1,1,False,3]] #7
+  - [-1, 1, UniversalInvertedResidual, [128, 0, 3,0,1,1,1,False,3]]
+  - [-1, 1, UniversalInvertedResidual, [128, 0, 3,0,1,1,1,False,3]]
+  - [-1, 1, ConvBnAct, [1024, 1, 1]]  #10
+
+
+
+# YOLOv10.0n head
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 5], 1, Concat, [1]] # cat backbone P4
+  - [-1, 2, C3k2, [128, False]] # 15
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 2], 1, Concat, [1]] # cat backbone P3
+  - [-1, 2, C3k2, [64, False]] # 18 (P3/8-small)
+
+  - [-1, 1, Conv, [64, 3, 2]]
+  - [[-1, 13], 1, Concat, [1]] # cat head P4
+  - [-1, 2, C3k2, [128, False]] # 21 (P4/16-medium)
+
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [[-1, 10], 1, Concat, [1]] # cat head P5
+  - [-1, 2, C3k2, [256, True]] # 24 (P5/32-large)
+
+  - [[16,19,22], 1, Detect, [nc]] # Detect(P3, P4, P5)

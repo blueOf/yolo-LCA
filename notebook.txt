@@ -1,0 +1,55 @@
+
+cnn-JF-32 summary (fused): 175 layers, 2,753,973 parameters, 0 gradients, 9.4 GFLOPs
+cnn-highc summary (fused): 161 layers, 2,753,893 parameters, 0 gradients, 9.4 GFLOPs
+cnn summary (fused): 161 layers, 2,745,637 parameters, 0 gradients, 7.7 GFLOPs
+cnn-JF-64 summary (fused): 175 layers, 2,770,933 parameters, 0 gradients, 12.8 GFLOPs
+YOLO11 summary (fused): 238 layers, 2,583,517 parameters, 0 gradients, 6.3 GFLOPs
+YOLO11-highc summary (fused): 238 layers, 2,598,685 parameters, 0 gradients, 7.3 GFLOPs
+cnn-JF summary (fused): 175 layers, 2,829,429 parameters, 0 gradients, 24.7 GFLOPs
+
+
+runs/train/cnn_datasets_3/weights/best.pt
+runs/train/cnn-highc_datasets_3/weights/best.pt
+runs/train/cnn-JF_datasets_3/weights/best.pt
+runs/train/cnn-JF-32_datasets_3/weights/best.pt
+runs/train/cnn-JF-64_datasets_3/weights/best.pt
+runs/train/yolo11_datasets_3/weights/best.pt
+runs/train/yolo11-highc_datasets_3/weights/best.pt
+
+python ./valid.py runs/train/2_cnn_datasets_3/weights/best.pt --device=7
+
+
+得到结论 初步的结论轮次需要跑满
+
+
+----------------------------------------------------------------------------------------------------
+1.7
+修改了yolo的datasets
+路径
+ultralytics/data/build.py    build_yolo_dataset
+ultralytics/data/dataset.py
+修改不彻底 还需要进一步修改transformer针对多通道进行相同处理
+这一步目前还没有做到，预估比较复杂，暂时搁置
+
+----------------------------------------------------------------------------------------------------
+1.8
+启动训练，第一层通道数少量增加中间通道数 48*0.25   nohup python ./train.py ultralytics/cfg/models/mobilent/yolov11-RDD-JF.yaml --batch=8 --device=6 > logs/1-8-yolov11-RDD-JF.log 2>&1 &
+修改valid可以正确记录模型信息
+启动训练 nohup python ./train.py ultralytics/cfg/models/11/mobilev4.yaml --batch=8 --device=4 > logs/1-8-mobilenetv4.log 2>&1 &
+
+单纯所谓的jfusion 效果为-1  但是单纯的通道数增加，效果经过验证会增加，尤其是在yolo下，有一个点,所以记下来的目标是进一步修改，使得效果不为负
+但是依旧怀疑300轮 不足 进一步提高轮次到1000轮 patience 600
+再查看weight的过程中 发现训练结果里效果更好，但是valid集下效果不好，疑似后面过拟合，最后的突然下降是因为马赛克参数=1
+重启训练cnn，以及jf
+
+ nohup python ./train.py ultralytics/cfg/models/11/cnn.yaml --batch=8 --device=3 > logs/1-9-cnn.log 2>&1 &
+ 修改为阶梯式通道数目
+ nohup python ./train.py ultralytics/cfg/models/mobilent/cnn-JF-48.yaml --batch=8 --device=2 > logs/1-9-cnn-JF-48.log 2>&1 &
+ nohup python ./train.py ultralytics/cfg/models/11/cnn-highc.yaml --batch=16 --device=1 > logs/1-9-cnn-highc.log 2>&1 &
+ nohup python ./train.py ultralytics/cfg/models/mobilent/cnn-JF-32.yaml --batch=16 --device=7 > logs/1-9-cnn-JF-32.log 2>&1 &
+
+取消串行训练，改为一个大数据集训练
+ nohup python ./train.py ultralytics/cfg/models/11/yolo11.yaml --batch=8 --device=5 > logs/1-9-yolo11.log 2>&1 &
+
+
+ps -p 4077232,4015906,3990780,3984638,3976072 -o pid,ppid,uid,stat,cmd

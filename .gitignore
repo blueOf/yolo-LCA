@@ -1,0 +1,14 @@
+datasets/
+
+*.pyc
+__pycache__/
+.env
+node_modules/
+.vscode/
+*.zip
+*.tar.gz
+runs/
+valid/
+logs/
+tem/
+datasets-jpg/
