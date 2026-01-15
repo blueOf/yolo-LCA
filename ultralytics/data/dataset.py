@@ -1,6 +1,8 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
 import json
+import math
+import random
 from collections import defaultdict
 from itertools import repeat
 from multiprocessing.pool import ThreadPool
@@ -17,6 +19,7 @@ from ultralytics.utils.ops import resample_segments
 from ultralytics.utils.torch_utils import TORCHVISION_0_18
 
 from .augment import (
+    Albumentations,
     Compose,
     Format,
     Instances,
@@ -25,6 +28,8 @@ from .augment import (
     classify_augmentations,
     classify_transforms,
     v8_transforms,
+    RandomHSV,
+    RandomPerspective,
 )
 from .base import BaseDataset
 from .utils import (
@@ -286,6 +291,341 @@ class YOLODataset(BaseDataset):
         return new_batch
 
 
+class RandomHSV_MultiChannel(RandomHSV):
+    """
+    Randomly adjusts HSV channels of a multi-channel image (e.g. 12 channels).
+    Applies the SAME random augmentation to every 3-channel block.
+    """
+
+    def __call__(self, labels):
+        img = labels["img"]
+        # Check if augmentations are enabled
+        if self.hgain or self.sgain or self.vgain:
+            r = (
+                np.random.uniform(-1, 1, 3) * [self.hgain, self.sgain, self.vgain] + 1
+            )  # random gains
+
+            # Create LUTs once
+            dtype = img.dtype  # uint8
+            x = np.arange(0, 256, dtype=r.dtype)
+            lut_hue = ((x * r[0]) % 180).astype(dtype)
+            lut_sat = np.clip(x * r[1], 0, 255).astype(dtype)
+            lut_val = np.clip(x * r[2], 0, 255).astype(dtype)
+
+            # Process in 3-channel chunks
+            num_channels = img.shape[2]
+
+            # Use original implementation if just 3 channels
+            if num_channels == 3:
+                return super().__call__(labels)
+
+            if num_channels % 3 != 0:
+                LOGGER.warning(
+                    f"RandomHSV_MultiChannel: Image channels {num_channels} not divisible by 3. Skipping HSV."
+                )
+                return labels
+
+            # Apply identical transformation to each 3-channel block
+            for i in range(0, num_channels, 3):
+                chunk = img[:, :, i : i + 3]
+
+                # Convert to HSV (OpenCV expects BGR)
+                # Note: cv2.split/merge might be slow, but safe
+                hue, sat, val = cv2.split(cv2.cvtColor(chunk, cv2.COLOR_BGR2HSV))
+
+                # Apply LUT
+                hue = cv2.LUT(hue, lut_hue)
+                sat = cv2.LUT(sat, lut_sat)
+                val = cv2.LUT(val, lut_val)
+
+                # Convert back to BGR and update
+                im_hsv = cv2.merge((hue, sat, val))
+                # cv2.cvtColor in newer versions might not like non-contiguous dst
+                chunk_bgr = cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR)
+                img[:, :, i : i + 3] = chunk_bgr
+
+            # labels["img"] is updated in-place because it references the array
+        return labels
+
+
+class RandomPerspective_MultiChannel(RandomPerspective):
+    """
+    Applies RandomPerspective to multiple 3-channel blocks consistently.
+    Ensures padding (borderValue) is (114,114,114) for EACH block.
+    """
+
+    def affine_transform(self, img, border):
+        # Center
+        C = np.eye(3, dtype=np.float32)
+
+        C[0, 2] = -img.shape[1] / 2  # x translation (pixels)
+        C[1, 2] = -img.shape[0] / 2  # y translation (pixels)
+
+        # Perspective
+        P = np.eye(3, dtype=np.float32)
+        P[2, 0] = random.uniform(
+            -self.perspective, self.perspective
+        )  # x perspective (about y)
+        P[2, 1] = random.uniform(
+            -self.perspective, self.perspective
+        )  # y perspective (about x)
+
+        # Rotation and Scale
+        R = np.eye(3, dtype=np.float32)
+        a = random.uniform(-self.degrees, self.degrees)
+        # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
+        s = random.uniform(1 - self.scale, 1 + self.scale)
+        # s = 2 ** random.uniform(-scale, scale)
+        R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
+
+        # Shear
+        S = np.eye(3, dtype=np.float32)
+        S[0, 1] = math.tan(
+            random.uniform(-self.shear, self.shear) * math.pi / 180
+        )  # x shear (deg)
+        S[1, 0] = math.tan(
+            random.uniform(-self.shear, self.shear) * math.pi / 180
+        )  # y shear (deg)
+
+        # Translation
+        T = np.eye(3, dtype=np.float32)
+        T[0, 2] = (
+            random.uniform(0.5 - self.translate, 0.5 + self.translate) * self.size[0]
+        )  # x translation (pixels)
+        T[1, 2] = (
+            random.uniform(0.5 - self.translate, 0.5 + self.translate) * self.size[1]
+        )  # y translation (pixels)
+
+        # Combined rotation matrix
+        M = T @ S @ R @ P @ C  # order of operations (right to left) is IMPORTANT
+
+        # Affine image
+        if (
+            (border[0] != 0) or (border[1] != 0) or (M != np.eye(3)).any()
+        ):  # image changed
+
+            num_channels = img.shape[2]
+            if num_channels > 3 and num_channels % 3 == 0:
+                chunks = []
+                for i in range(0, num_channels, 3):
+                    chunk = img[:, :, i : i + 3]
+                    if self.perspective:
+                        chunk = cv2.warpPerspective(
+                            chunk, M, dsize=self.size, borderValue=(114, 114, 114)
+                        )
+                    else:
+                        chunk = cv2.warpAffine(
+                            chunk, M[:2], dsize=self.size, borderValue=(114, 114, 114)
+                        )
+                    chunks.append(chunk)
+                img = np.concatenate(chunks, axis=2)
+            else:
+                if self.perspective:
+                    img = cv2.warpPerspective(
+                        img, M, dsize=self.size, borderValue=(114, 114, 114)
+                    )
+                else:  # affine
+                    img = cv2.warpAffine(
+                        img, M[:2], dsize=self.size, borderValue=(114, 114, 114)
+                    )
+
+        return img, M, s
+
+
+class Albumentations_MultiChannel:
+    """
+    Albumentations transformations for multi-channel (e.g., 12-channel) images.
+    Applies the SAME transform parameters to each 3-channel block using ReplayCompose.
+    """
+
+    def __init__(self, p=1.0):
+        self.p = p
+        self.transform = None
+        prefix = colorstr("albumentations: ")
+        try:
+            import albumentations as A
+            from ultralytics.utils.checks import check_version
+
+            check_version(A.__version__, "1.0.3", hard=True)
+
+            # Spatial transforms list to check if bboxes need processing
+            spatial_transforms = {
+                "Affine",
+                "BBoxSafeRandomCrop",
+                "CenterCrop",
+                "CoarseDropout",
+                "Crop",
+                "CropAndPad",
+                "CropNonEmptyMaskIfExists",
+                "D4",
+                "ElasticTransform",
+                "Flip",
+                "GridDistortion",
+                "GridDropout",
+                "HorizontalFlip",
+                "Lambda",
+                "LongestMaxSize",
+                "MaskDropout",
+                "MixUp",
+                "Morphological",
+                "NoOp",
+                "OpticalDistortion",
+                "PadIfNeeded",
+                "Perspective",
+                "PiecewiseAffine",
+                "PixelDropout",
+                "RandomCrop",
+                "RandomCropFromBorders",
+                "RandomGridShuffle",
+                "RandomResizedCrop",
+                "RandomRotate90",
+                "RandomScale",
+                "RandomSizedBBoxSafeCrop",
+                "RandomSizedCrop",
+                "Resize",
+                "Rotate",
+                "SafeRotate",
+                "ShiftScaleRotate",
+                "SmallestMaxSize",
+                "Transpose",
+                "VerticalFlip",
+                "XYMasking",
+            }
+
+            # Define transforms (Standard YOLO set)
+            T = [
+                A.Blur(p=0.01),
+                A.MedianBlur(p=0.01),
+                A.ToGray(p=0.01),
+                A.CLAHE(p=0.01),
+                A.RandomBrightnessContrast(p=0.0),
+                A.RandomGamma(p=0.0),
+                # A.ImageCompression(quality_lower=75, p=0.0),
+            ]
+
+            self.contains_spatial = any(
+                transform.__class__.__name__ in spatial_transforms for transform in T
+            )
+
+            # Use ReplayCompose to ensure consistency across channels
+            if self.contains_spatial:
+                self.transform = A.ReplayCompose(
+                    T,
+                    bbox_params=A.BboxParams(
+                        format="yolo", label_fields=["class_labels"]
+                    ),
+                )
+            else:
+                self.transform = A.ReplayCompose(T)
+
+            LOGGER.info(
+                prefix
+                + ", ".join(
+                    f"{x}".replace("always_apply=False, ", "") for x in T if x.p
+                )
+            )
+
+        except ImportError:
+            pass
+        except Exception as e:
+            LOGGER.info(f"{prefix}{e}")
+
+    def __call__(self, labels):
+        if self.transform is None or random.random() > self.p:
+            return labels
+
+        img = labels["img"]
+        cls = labels["cls"]
+
+        h, w, c = img.shape
+        if c % 3 != 0:
+            return labels
+
+        num_blocks = c // 3
+        imgs = np.split(img, num_blocks, axis=2)
+
+        import albumentations as A  # Ensure A is available
+
+        # Prepare for first block
+        if self.contains_spatial:
+            labels["instances"].convert_bbox("xywh")
+            labels["instances"].normalize(w, h)
+            bboxes = labels["instances"].bboxes
+
+            # Apply to first block
+            # Note: Albumentations expects bboxes as list of lists usually, but numpy array might work depending on version
+            # Standard YOLO passes numpy array? Let's check original.
+            # Original: new = self.transform(image=im, bboxes=bboxes, class_labels=cls)
+            # "bboxes" in YOLO are numpy.
+
+            data = self.transform(image=imgs[0], bboxes=bboxes, class_labels=cls)
+
+            # Replay for other blocks
+            out_imgs = [data["image"]]
+            for i in range(1, num_blocks):
+                if self.contains_spatial:
+                    # Pass dummy class_labels and bboxes to satisfy validation, ignore outputs
+                    res = A.ReplayCompose.replay(
+                        data["replay"], image=imgs[i], bboxes=[], class_labels=[]
+                    )
+                else:
+                    res = A.ReplayCompose.replay(data["replay"], image=imgs[i])
+                out_imgs.append(res["image"])
+
+            # Reassemble
+            if len(data["class_labels"]) > 0:
+                labels["img"] = np.concatenate(out_imgs, axis=2)
+                labels["cls"] = np.array(data["class_labels"])
+                bboxes = np.array(data["bboxes"], dtype=np.float32)
+                labels["instances"].update(bboxes=bboxes)
+        else:
+            # Non-spatial
+            data = self.transform(image=imgs[0])
+            out_imgs = [data["image"]]
+            for i in range(1, num_blocks):
+                res = A.ReplayCompose.replay(data["replay"], image=imgs[i])
+                out_imgs.append(res["image"])
+
+            labels["img"] = np.concatenate(out_imgs, axis=2)
+
+        return labels
+
+
+class Format_MultiChannel(Format):
+    """
+    Format class for Multi-Channel images (e.g. 12 channels).
+    Maintains channel order for each 3-channel block when flipping (BGR <-> RGB).
+    """
+
+    def _format_img(self, img):
+        """
+        Formats an image for YOLO from a Numpy array to a PyTorch tensor.
+        Handles multi-channel flip correctly.
+        """
+        if len(img.shape) < 3:
+            img = np.expand_dims(img, -1)
+
+        # img is HWC. Transpose to CHW.
+        img = img.transpose(2, 0, 1)
+
+        # Check probability to return BGR (if > bgr, we flip to RGB)
+        # self.bgr is "probability to return BGR"
+        # if r > self.bgr -> flip to RGB (if input is BGR)
+        if random.uniform(0, 1) > self.bgr:
+            c = img.shape[0]
+            if c % 3 == 0:
+                # Flip each 3-channel block (BGR -> RGB)
+                for i in range(0, c, 3):
+                    # Reverses the 3 channels in this block
+                    img[i : i + 3] = img[i : i + 3][::-1]
+            else:
+                # Fallback to global flip
+                img = img[::-1]
+
+        img = np.ascontiguousarray(img)
+        return torch.from_numpy(img)
+
+
 class YOLOJFDataset(YOLODataset):
     """
     Extended YOLO Dataset for loading multiple quality images.
@@ -293,13 +633,78 @@ class YOLOJFDataset(YOLODataset):
 
     def __init__(self, *args, data=None, task="detect", q_list=None, **kwargs):
         """Initializes the YOLOJFDataset with quality list for multi-image loading."""
-        self.q_list = q_list if q_list is not None else [10, 20, 50]
+        self.q_list = q_list if q_list is not None else [10, 25, 50]
         print(f"[YOLOJFDataset] Initialized with q_list: {self.q_list}")
         super().__init__(*args, data=data, task=task, **kwargs)
 
         # Calculate output channels
         self.output_channels = (len(self.q_list) + 1) * 3
         print(f"[YOLOJFDataset] Output channels: {self.output_channels}")
+
+    def build_transforms(self, hyp=None):
+        """Builds transforms and customizes for multi-channel support."""
+        if self.augment:
+            transforms = super().build_transforms(hyp)
+            # transforms is a Compose object. transforms.transforms is the list.
+
+            new_list = []
+            for t in transforms.transforms:
+                if isinstance(t, RandomHSV):
+                    # Replace with MultiChannel version
+                    new_list.append(
+                        RandomHSV_MultiChannel(
+                            hgain=t.hgain, sgain=t.sgain, vgain=t.vgain
+                        )
+                    )
+                elif isinstance(t, Albumentations):
+                    # Use MultiChannel Albumentations
+                    new_list.append(Albumentations_MultiChannel(p=t.p))
+                elif isinstance(t, Format):
+                    # Use MultiChannel Format
+                    new_list.append(
+                        Format_MultiChannel(
+                            bbox_format=t.bbox_format,
+                            normalize=t.normalize,
+                            return_mask=t.return_mask,
+                            return_keypoint=t.return_keypoint,
+                            return_obb=t.return_obb,
+                            mask_ratio=t.mask_ratio,
+                            mask_overlap=t.mask_overlap,
+                            batch_idx=t.batch_idx,
+                            bgr=t.bgr,
+                        )
+                    )
+                else:
+                    new_list.append(t)
+
+            transforms.transforms = new_list
+            return transforms
+        else:
+            # Validation/Test transforms also use Format. We need to patch it too!
+            transforms = super().build_transforms(hyp)
+            # Even in validation, Format is used.
+            # Standard build_transforms returns Compose([LetterBox, Format])
+
+            new_list = []
+            for t in transforms.transforms:
+                if isinstance(t, Format):
+                    new_list.append(
+                        Format_MultiChannel(
+                            bbox_format=t.bbox_format,
+                            normalize=t.normalize,
+                            return_mask=t.return_mask,
+                            return_keypoint=t.return_keypoint,
+                            return_obb=t.return_obb,
+                            mask_ratio=t.mask_ratio,
+                            mask_overlap=t.mask_overlap,
+                            batch_idx=t.batch_idx,
+                            bgr=t.bgr,
+                        )
+                    )
+                else:
+                    new_list.append(t)
+            transforms.transforms = new_list
+            return transforms
 
     def get_q_image_path(self, original_path, q_value):
         """Get the path of quality-compressed image."""
@@ -334,19 +739,36 @@ class YOLOJFDataset(YOLODataset):
         # Load all quality versions
         for q_value in self.q_list:
             q_path = self.get_q_image_path(original_path, q_value)
+            q_npy_path = q_path.with_suffix(".npy")
 
-            if q_path.exists():
-                q_im = cv2.imread(str(q_path))
-                if q_im is None:
-                    LOGGER.warning(f"Failed to load:  {q_path}")
-                    q_im = im.copy()
+            q_im = None
+            # Prioritize loading .npy
+            if q_npy_path.exists():
+                try:
+                    q_im = np.load(str(q_npy_path))
+                except Exception as e:
+                    LOGGER.warning(f"Failed to load npy: {q_npy_path}, error: {e}")
+
+            # Fallback to image loading if npy not found or failed
+            if q_im is None:
+                if q_path.exists():
+                    q_im = cv2.imread(str(q_path))
+                    if q_im is None:
+                        LOGGER.warning(f"Failed to load:  {q_path}")
+                        q_im = im.copy()
+                    else:
+                        # Resize to match original
+                        if q_im.shape[:2] != (h, w):
+                            q_im = cv2.resize(
+                                q_im, (w, h), interpolation=cv2.INTER_LINEAR
+                            )
                 else:
-                    # Resize to match original
-                    if q_im.shape[:2] != (h, w):
-                        q_im = cv2.resize(q_im, (w, h), interpolation=cv2.INTER_LINEAR)
+                    LOGGER.warning(f"Not found: {q_path}")
+                    q_im = im.copy()
             else:
-                LOGGER.warning(f"Not found: {q_path}")
-                q_im = im.copy()
+                # Check resize for npy loaded data just in case
+                if q_im.shape[:2] != (h, w):
+                    q_im = cv2.resize(q_im, (w, h), interpolation=cv2.INTER_LINEAR)
 
             images.append(q_im)
 

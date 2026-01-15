@@ -23,7 +23,6 @@ python ./valid.py runs/train/2_cnn_datasets_3/weights/best.pt --device=7
 
 
 ----------------------------------------------------------------------------------------------------
-1.7
 修改了yolo的datasets
 路径
 ultralytics/data/build.py    build_yolo_dataset
@@ -32,7 +31,6 @@ ultralytics/data/dataset.py
 这一步目前还没有做到，预估比较复杂，暂时搁置
 
 ----------------------------------------------------------------------------------------------------
-1.8
 启动训练，第一层通道数少量增加中间通道数 48*0.25   nohup python ./train.py ultralytics/cfg/models/mobilent/yolov11-RDD-JF.yaml --batch=8 --device=6 > logs/1-8-yolov11-RDD-JF.log 2>&1 &
 修改valid可以正确记录模型信息
 启动训练 nohup python ./train.py ultralytics/cfg/models/11/mobilev4.yaml --batch=8 --device=4 > logs/1-8-mobilenetv4.log 2>&1 &
@@ -49,7 +47,46 @@ ultralytics/data/dataset.py
  nohup python ./train.py ultralytics/cfg/models/mobilent/cnn-JF-32.yaml --batch=16 --device=7 > logs/1-9-cnn-JF-32.log 2>&1 &
 
 取消串行训练，改为一个大数据集训练
- nohup python ./train.py ultralytics/cfg/models/11/yolo11.yaml --batch=8 --device=5 > logs/1-9-yolo11.log 2>&1 &
+已经训练结束 nohup python ./train.py ultralytics/cfg/models/11/cnn.yaml --batch=64 --device=6 --workers=64 > logs/1-11-cnn.log 2>&1 &
+ nohup python ./train.py ultralytics/cfg/models/11/yolo11.yaml --batch=64 --device=7 --workers=32 > logs/1-11-yolo11.log 2>&1 &
 
 
-ps -p 4077232,4015906,3990780,3984638,3976072 -o pid,ppid,uid,stat,cmd
+------------------
+
+
+得出结论 一个完整的数据集 相较于切分数据集做继承依次训练能够更有效地记住特征 避免遗忘
+在整个数据集下ap50 有较大的提升，之后需要重新以完整数据集进行训练
+同时轮次可以降低到900轮
+
+但是大量训练下jpeg就需要优化 dataloader可以处理多通道
+
+nohup python ./train.py ultralytics/cfg/models/YOLO-RDD/yolov11-RDD.yaml --batch=64 --device=6 --workers=32  > logs/1-11-yolov11-RDD.log 2>&1 &
+taskset -c 129-144 numactl --membind=1 python ./train.py ultralytics/cfg/models/11/yolo11.yaml --batch=64 --device=7 --workers=16 > logs/1-11-yolo11.log 2>&1 &
+
+得到新一轮的baseline，基本确定
+训练需要指定核心，避免同时训练带来cpu抢夺开销
+
+
+------------------------------------
+taskset -c 0-100 numactl --membind=1 python ./train.py ultralytics/cfg/models/11/yolo11-highc.yaml --batch=64 --device=6 --workers=16 > logs/1-11-yolo11-hc.log 2>&1 &
+taskset -c 139-200 numactl --membind=1 python ./train.py ultralytics/cfg/models/mobilent/yolov11-DWJF.yaml --batch=64 --device=7 --workers=16 > logs/1-11-yolov11-DWJF.log 2>&1 &
+
+
+第一个通道的输入通道修改yaml ch
+YOLOJFDataset 可以正确返回指定通道数目的图形 (len(q)+1)*3
+预期处理多通道的transformer变换
+
+
+--------------------------------------
+修改了了多通道的transformer，但是目前训练速度放慢尝试找出原因
+
+
+常用指令
+ps -p 1068630 -o pid,ppid,uid,stat,cmd
+
+watch -n0.1 nvidia-smi
+watch -n0.1 mpstat -P ALL 1 1
+
+
+
+ultralytics/cfg/models/mobilent/yolov11-DWJF.yaml

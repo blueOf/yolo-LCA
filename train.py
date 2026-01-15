@@ -123,29 +123,30 @@ def train_on_dataset(
     print("=" * 70)
 
     # 加载模型
-    model = YOLO(model_path)
+    model = YOLO("runs/train/yolov11-DWJF_datasets2/weights/best.pt")
 
     # 训练参数配置
     results = model.train(
         # data=yaml_file,
-        data=f"datasets/SVRDD/svrdd_{dataset_num}.yaml",
+        data=f"datasets/SVRDD/svrdd.yaml",
         # data=f"datasets/yaml/RDD2022_United_States_{dataset_num}.yaml",
         imgsz=640,
         epochs=epochs,
         batch=batch,
         optimizer="SGD",
         save_period=30,
-        cos_lr=True,
         seed=0,
+        cos_lr=True,
         mosaic=1,
         project="runs/train",
-        name=f"{model_name}_datasets_{dataset_num}",
-        amp=False,
+        name=f"{model_name}_datasets",
+        amp=True,
         # 为避免多进程 DataLoader 在某些环境下卡死，这里显式使用单进程
         workers=workers,
-        # resume=True,  # 确保不同数据集的训练结果不会覆盖
-        patience=600,
+        resume=True,  # 确保不同数据集的训练结果不会覆盖
+        patience=900,
         device=device,
+        cache="disk",
     )
     # 获取最佳模型路径
     best_model_path = f"{results.save_dir}/weights/best.pt"
@@ -182,11 +183,11 @@ def main():
         "--device", type=int, default=None, help="GPU设备编号（不指定则自动选择）"
     )
     parser.add_argument(
-        "--epochs", type=int, default=1000, help="每个数据集的训练轮数（默认：1000）"
+        "--epochs", type=int, default=900, help="每个数据集的训练轮数（默认：900）"
     )
     parser.add_argument("--batch", type=int, default=16, help="批次大小（默认：16）")
     parser.add_argument(
-        "--workers", type=int, default=8, help="数据加载进程数（默认：8）"
+        "--workers", type=int, default=16, help="数据加载进程数（默认：8）"
     )
 
     args = parser.parse_args()
@@ -231,18 +232,18 @@ def main():
         is_first=True,
     )
 
-    for dataset_num in range(2, 4):
-        # 后续数据集：使用上一个数据集的最佳模型继续训练
-        current_model = best_model_path
-        best_model_path = train_on_dataset(
-            current_model,
-            dataset_num,
-            model_name,
-            device,
-            args.epochs,
-            args.batch,
-            args.workers,
-        )
+    # for dataset_num in range(2, 4):
+    #    # 后续数据集：使用上一个数据集的最佳模型继续训练
+    #    current_model = best_model_path
+    #    best_model_path = train_on_dataset(
+    #        current_model,
+    #        dataset_num,
+    #        model_name,
+    #        device,
+    #        args.epochs,
+    #        args.batch,
+    #        args.workers,
+    #    )
 
     # 最终评估
     print("\n" + "#" * 70)

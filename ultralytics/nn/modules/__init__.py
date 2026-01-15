@@ -69,6 +69,7 @@ from .block import (
     C3k2_HKA,
     C2PSA_1,
     JpegFusionModule,
+    JpegFusionModule12C,
 )
 from .conv import (
     CBAM,

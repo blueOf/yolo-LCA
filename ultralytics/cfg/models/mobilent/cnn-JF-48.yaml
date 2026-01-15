@@ -13,7 +13,7 @@ scales:  # [depth, width, max_channels]
 # Simple CNN backbone: 每个stage一次下采样(步幅=2) + 若干 3x3 s=1 卷积以提高参数量
 backbone:
   # [from, repeats, module, args]
-  - [-1, 1, JpegFusionModule_s, [64, 48,2]]     # 0  P1/2
+  - [-1, 1, JpegFusionModule, [64, 48,2]]     # 0  P1/2
   - [-1, 1, Conv, [64, 3, 1]]     # 1  额外 s=1
 
   - [-1, 1, Conv, [128, 3, 2]]    # 2  P2/4

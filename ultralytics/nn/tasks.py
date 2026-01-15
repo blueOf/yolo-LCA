@@ -74,6 +74,7 @@ from ultralytics.nn.modules import (
     C3k2_HKA,
     C2PSA_1,
     JpegFusionModule,
+    JpegFusionModule12C,
 )
 from ultralytics.utils import (
     DEFAULT_CFG_DICT,
@@ -1168,6 +1169,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3k2_HKA,
             C2PSA_1,
             JpegFusionModule,
+            JpegFusionModule12C,
         }:
             c1, c2 = ch[f], args[0]
             if (

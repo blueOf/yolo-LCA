@@ -62,6 +62,7 @@ __all__ = (
     "C3k2_HKA",
     "C2PSA_1",
     "JpegFusionModule",
+    "JpegFusionModule12C",
 )
 
 # region
@@ -157,102 +158,102 @@ def reencode_via_jpeg_return_tensor(
     return t
 
 
+# class JpegFusionModule(nn.Module):
+#    """
+#    img -> q1 -> conv ---\
+#    img -> q2 -> conv ---- concat -> 1x1 conv ----\
+#    img -> q3 -> conv ---------------------------- concat -> 1x1 conv ----\
+#    img -> origin -> conv --------------------------------------------- concat -> 1x1 conv -> out
+#    """
+
+#    def __init__(
+#        self,
+#        input_channels: int,
+#        output_channels: int,
+#        conv_channels: int = 64,
+#        conv_stride: int = 2,
+#        q1: int = 10,
+#        q2: int = 20,
+#        q3: int = 50,
+#        subsampling: int = 2,
+#    ):
+#        super().__init__()
+#        self.q1 = int(q1)
+#        self.q2 = int(q2)
+#        self.q3 = int(q3)
+#        self.subsampling = int(subsampling)
+#        self.conv_stride = int(conv_stride)
+
+#        # 四路分支 conv：用你的 Conv，k=3, s=conv_stride
+#        self.conv_q1 = Conv(input_channels, conv_channels, k=3, s=self.conv_stride)
+#        self.conv_q2 = Conv(input_channels, conv_channels, k=3, s=self.conv_stride)
+#        self.conv_q3 = Conv(input_channels, conv_channels, k=3, s=self.conv_stride)
+#        self.conv_ori = Conv(input_channels, conv_channels, k=3, s=self.conv_stride)
+
+#        # 1x1 融合 conv（也用你的 Conv，k=1）
+#        self.fuse_1_2 = Conv(2 * conv_channels, conv_channels, k=1, s=1)
+#        self.fuse_prev_3 = Conv(2 * conv_channels, conv_channels, k=1, s=1)
+#        self.fuse_prev_ori_out = Conv(
+#            2 * conv_channels, output_channels, k=1, s=1, act=False
+#        )
+
+#    @torch.no_grad()
+#    def _jpeg_batch(self, x: torch.Tensor, quality: int) -> torch.Tensor:
+#        if x.ndim != 4:
+#            raise ValueError(f"Expected x with shape (B,C,H,W), got {tuple(x.shape)}")
+#        b, c, h, w = x.shape
+#        device = x.device
+
+#        if x.dtype == torch.uint8:
+#            x_u8 = x
+#        else:
+#            xf = x.detach()
+#            if xf.max() <= 1.0:
+#                xf = xf * 255.0
+#            x_u8 = xf.round().clamp(0, 255).to(torch.uint8)
+
+#        outs = []
+#        for i in range(b):
+#            t_u8 = reencode_via_jpeg_return_tensor(
+#                x_u8[i],
+#                quality=quality,
+#                subsampling=self.subsampling,
+#                torch_device=None,
+#            )
+#            outs.append(t_u8)
+
+#        y_u8 = torch.stack(outs, dim=0)  # CPU uint8
+#        y = y_u8.to(device=device, dtype=torch.float32) / 255.0
+#        return y
+
+#    def forward(self, img):
+#        if img.ndim != 4:
+#            raise ValueError(f"Expected img (B,C,H,W), got {tuple(img.shape)}")
+#        if img.shape[1] != 3:
+#            raise ValueError(
+#                f"This implementation assumes RGB input (C==3) for JPEG branches, got C={img.shape[1]}."
+#            )
+
+#        # origin 分支（不做 JPEG）
+#        x_ori = img if img.dtype.is_floating_point else img.float() / 255.0
+#        f_ori = self.conv_ori(x_ori)
+
+#        # JPEG 分支
+#        x1 = self._jpeg_batch(img, quality=self.q1)
+#        x2 = self._jpeg_batch(img, quality=self.q2)
+#        x3 = self._jpeg_batch(img, quality=self.q3)
+
+#        f1 = self.conv_q1(x1)
+#        f2 = self.conv_q2(x2)
+#        f3 = self.conv_q3(x3)
+
+#        f_1_2 = self.fuse_1_2(torch.cat([f1, f2], dim=1))
+#        f_1_2_3 = self.fuse_prev_3(torch.cat([f_1_2, f3], dim=1))
+#        out = self.fuse_prev_ori_out(torch.cat([f_1_2_3, f_ori], dim=1))
+#        return out
+
+
 class JpegFusionModule(nn.Module):
-    """
-    img -> q1 -> conv ---\
-    img -> q2 -> conv ---- concat -> 1x1 conv ----\
-    img -> q3 -> conv ---------------------------- concat -> 1x1 conv ----\
-    img -> origin -> conv --------------------------------------------- concat -> 1x1 conv -> out
-    """
-
-    def __init__(
-        self,
-        input_channels: int,
-        output_channels: int,
-        conv_channels: int = 64,
-        conv_stride: int = 2,
-        q1: int = 10,
-        q2: int = 20,
-        q3: int = 50,
-        subsampling: int = 2,
-    ):
-        super().__init__()
-        self.q1 = int(q1)
-        self.q2 = int(q2)
-        self.q3 = int(q3)
-        self.subsampling = int(subsampling)
-        self.conv_stride = int(conv_stride)
-
-        # 四路分支 conv：用你的 Conv，k=3, s=conv_stride
-        self.conv_q1 = Conv(input_channels, conv_channels, k=3, s=self.conv_stride)
-        self.conv_q2 = Conv(input_channels, conv_channels, k=3, s=self.conv_stride)
-        self.conv_q3 = Conv(input_channels, conv_channels, k=3, s=self.conv_stride)
-        self.conv_ori = Conv(input_channels, conv_channels, k=3, s=self.conv_stride)
-
-        # 1x1 融合 conv（也用你的 Conv，k=1）
-        self.fuse_1_2 = Conv(2 * conv_channels, conv_channels, k=1, s=1)
-        self.fuse_prev_3 = Conv(2 * conv_channels, conv_channels, k=1, s=1)
-        self.fuse_prev_ori_out = Conv(
-            2 * conv_channels, output_channels, k=1, s=1, act=False
-        )
-
-    @torch.no_grad()
-    def _jpeg_batch(self, x: torch.Tensor, quality: int) -> torch.Tensor:
-        if x.ndim != 4:
-            raise ValueError(f"Expected x with shape (B,C,H,W), got {tuple(x.shape)}")
-        b, c, h, w = x.shape
-        device = x.device
-
-        if x.dtype == torch.uint8:
-            x_u8 = x
-        else:
-            xf = x.detach()
-            if xf.max() <= 1.0:
-                xf = xf * 255.0
-            x_u8 = xf.round().clamp(0, 255).to(torch.uint8)
-
-        outs = []
-        for i in range(b):
-            t_u8 = reencode_via_jpeg_return_tensor(
-                x_u8[i],
-                quality=quality,
-                subsampling=self.subsampling,
-                torch_device=None,
-            )
-            outs.append(t_u8)
-
-        y_u8 = torch.stack(outs, dim=0)  # CPU uint8
-        y = y_u8.to(device=device, dtype=torch.float32) / 255.0
-        return y
-
-    def forward(self, img):
-        if img.ndim != 4:
-            raise ValueError(f"Expected img (B,C,H,W), got {tuple(img.shape)}")
-        if img.shape[1] != 3:
-            raise ValueError(
-                f"This implementation assumes RGB input (C==3) for JPEG branches, got C={img.shape[1]}."
-            )
-
-        # origin 分支（不做 JPEG）
-        x_ori = img if img.dtype.is_floating_point else img.float() / 255.0
-        f_ori = self.conv_ori(x_ori)
-
-        # JPEG 分支
-        x1 = self._jpeg_batch(img, quality=self.q1)
-        x2 = self._jpeg_batch(img, quality=self.q2)
-        x3 = self._jpeg_batch(img, quality=self.q3)
-
-        f1 = self.conv_q1(x1)
-        f2 = self.conv_q2(x2)
-        f3 = self.conv_q3(x3)
-
-        f_1_2 = self.fuse_1_2(torch.cat([f1, f2], dim=1))
-        f_1_2_3 = self.fuse_prev_3(torch.cat([f_1_2, f3], dim=1))
-        out = self.fuse_prev_ori_out(torch.cat([f_1_2_3, f_ori], dim=1))
-        return out
-
-
-class JpegFusionModule_s(nn.Module):
     """
     img -> q1 -> conv ---\
     img -> q2 -> conv ---- concat -> 1x1 conv ----\
@@ -440,6 +441,71 @@ class DW_JpegFusionModule(nn.Module):
         f2 = self.conv_q2(x2)
         f3 = self.conv_q3(x3)
 
+        f_1_2 = self.fuse_1_2(torch.cat([f1, f2], dim=1))
+        f_1_2_3 = self.fuse_prev_3(torch.cat([f_1_2, f3], dim=1))
+        out = self.fuse_prev_ori_out(torch.cat([f_1_2_3, f_ori], dim=1))
+        return out
+
+
+class JpegFusionModule12C(nn.Module):
+    """
+    Simplified JpegFusionModule for 12-channel input (Orig + Q1 + Q2 + Q3).
+    Removes internal JPEG compression logic as the dataloader provides pre-processed channels.
+    Assumes input shape (B, 12, H, W) where channels are concatenated: [Original, Q1, Q2, Q3].
+    """
+
+    def __init__(
+        self,
+        input_channels: int,
+        output_channels: int,
+        conv_channels: int = 64,
+        conv_stride: int = 2,
+    ):
+        super().__init__()
+        self.conv_stride = int(conv_stride)
+
+        # Determine step size (should be 3 if input is 12)
+        c_step = input_channels // 4
+
+        # Branch Convolutions
+        # Original branch
+        self.conv_ori = Conv(c_step, conv_channels, k=3, s=self.conv_stride)
+        # Quality branches
+        self.conv_q1 = Conv(c_step, conv_channels // 4, k=3, s=self.conv_stride)
+        self.conv_q2 = Conv(c_step, conv_channels // 3, k=3, s=self.conv_stride)
+        self.conv_q3 = Conv(c_step, conv_channels // 2, k=3, s=self.conv_stride)
+
+        # 1x1 Fusion Convs
+        self.fuse_1_2 = Conv(
+            (conv_channels // 4 + conv_channels // 3), conv_channels // 2, k=1, s=1
+        )
+        self.fuse_prev_3 = Conv(
+            (conv_channels // 2 + conv_channels // 2), conv_channels, k=1, s=1
+        )
+        self.fuse_prev_ori_out = Conv(
+            2 * conv_channels, output_channels, k=1, s=1, act=False
+        )
+
+    def forward(self, x):
+        """
+        x: (B, 12, H, W)
+        Splits into 4 groups of 3 channels: Orin, Q1, Q2, Q3.
+        """
+        # Split input
+        print(x.shape)
+        step = x.shape[1] // 4
+        x_ori = x[:, :step, :, :]
+        x_q1 = x[:, step : 2 * step, :, :]
+        x_q2 = x[:, 2 * step : 3 * step, :, :]
+        x_q3 = x[:, 3 * step :, :, :]
+
+        # Forward pass branches
+        f_ori = self.conv_ori(x_ori)
+        f1 = self.conv_q1(x_q1)
+        f2 = self.conv_q2(x_q2)
+        f3 = self.conv_q3(x_q3)
+
+        # Fusion
         f_1_2 = self.fuse_1_2(torch.cat([f1, f2], dim=1))
         f_1_2_3 = self.fuse_prev_3(torch.cat([f_1_2, f3], dim=1))
         out = self.fuse_prev_ori_out(torch.cat([f_1_2_3, f_ori], dim=1))
