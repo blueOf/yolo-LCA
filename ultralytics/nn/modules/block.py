@@ -2062,8 +2062,8 @@ class RepC3(nn.Module):
         """Initialize CSP Bottleneck with a single convolution using input channels, output channels, and number."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c2, 1, 1)
-        self.cv2 = Conv(c1, c2, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
         self.m = nn.Sequential(*[RepConv(c_, c_) for _ in range(n)])
         self.cv3 = Conv(c_, c2, 1, 1) if c_ != c2 else nn.Identity()
 
@@ -2178,6 +2178,25 @@ class ResNetBlock(nn.Module):
         return F.relu(self.cv3(self.cv2(self.cv1(x))) + self.shortcut(x))
 
 
+class ResNetBasicBlock(nn.Module):
+    """ResNet basic block with two 3x3 convolution layers (for ResNet18/34)."""
+
+    def __init__(self, c1, c2, s=1):
+        """Initialize basic block with two 3x3 convolutions."""
+        super().__init__()
+        self.cv1 = Conv(c1, c2, k=3, s=s, p=1, act=True)
+        self.cv2 = Conv(c2, c2, k=3, s=1, p=1, act=False)
+        self.shortcut = (
+            nn.Sequential(Conv(c1, c2, k=1, s=s, act=False))
+            if s != 1 or c1 != c2
+            else nn.Identity()
+        )
+
+    def forward(self, x):
+        """Forward pass through the ResNet basic block."""
+        return F.relu(self.cv2(self.cv1(x)) + self.shortcut(x))
+
+
 class ResNetLayer(nn.Module):
     """ResNet layer with multiple ResNet blocks."""
 
@@ -2192,8 +2211,12 @@ class ResNetLayer(nn.Module):
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             )
         else:
-            blocks = [ResNetBlock(c1, c2, s, e=e)]
-            blocks.extend([ResNetBlock(e * c2, c2, 1, e=e) for _ in range(n - 1)])
+            if e == 1:  # BasicBlock (ResNet18/34)
+                blocks = [ResNetBasicBlock(c1, c2, s)]
+                blocks.extend([ResNetBasicBlock(c2, c2, 1) for _ in range(n - 1)])
+            else:  # Bottleneck (ResNet50/101/152)
+                blocks = [ResNetBlock(c1, c2, s, e=e)]
+                blocks.extend([ResNetBlock(e * c2, c2, 1, e=e) for _ in range(n - 1)])
             self.layer = nn.Sequential(*blocks)
 
     def forward(self, x):
