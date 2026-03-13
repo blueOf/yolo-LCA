@@ -58,6 +58,7 @@ __all__ = (
     "FastLocalDETR_PE",
     "FastLocalDETR",
     "ConvWithAttention",
+    "FusionBlock",
 )
 
 
@@ -3098,3 +3099,127 @@ class ConvWithAttention(nn.Module):
             res = res + out
 
         return res
+
+
+class FusionBlock(nn.Module):
+    """Cross-attention fusion block for multi-scale feature fusion.
+
+    Replaces Upsample/Downsample + Concat + C3k2 patterns in YOLO head.
+    Takes two feature maps at different spatial resolutions and fuses them using
+    cross-attention (downsample direction) or element-wise gated attention (upsample direction).
+
+    Input is a list [x_kv, x_q] where:
+        x_kv: feature map providing key/value (may be higher or lower spatial resolution).
+        x_q: feature map providing query (output spatial resolution matches this).
+
+    For downsample (x_kv higher-res than x_q): folds x_kv into factor x factor spatial
+    tokens per output position, then performs cross-attention with x_q as query.
+    For upsample (x_kv lower-res than x_q): expands x_kv to match x_q spatial size
+    via nearest interpolation, then performs element-wise gated attention.
+
+    Attributes:
+        kv_proj (Conv): 1x1 convolution projecting kv input to working channel dimension.
+        q_proj (Conv): 1x1 convolution projecting q input to working channel dimension.
+        norm_q (nn.LayerNorm): Layer normalization for query features.
+        norm_kv (nn.LayerNorm): Layer normalization for key/value features.
+        norm_out (nn.LayerNorm): Layer normalization for output features.
+        out_proj (Conv): 1x1 convolution projecting to output channels.
+    """
+
+    def __init__(self, c1, c2, c3, head_num=4):
+        """Initialize FusionBlock.
+
+        Args:
+            c1 (int): Channels of kv input (first input).
+            c2 (int): Channels of q input (second input), also the internal working dimension.
+            c3 (int): Output channels.
+            head_num (int): Number of attention heads.
+        """
+        super().__init__()
+        self.kv_proj = Conv(c1, c2, 1)
+        self.q_proj = Conv(c2, c2, 1)
+        self.norm_q = nn.LayerNorm(c2)
+        self.norm_kv = nn.LayerNorm(c2)
+        self.norm_out = nn.LayerNorm(c2)
+        self.out_proj = Conv(c2, c3, 1)
+        self.head_num = head_num
+        self.head_dim = c2 // head_num
+        self.scale = self.head_dim**-0.5
+        self._c2 = c2
+
+    def _apply_ln(self, x, norm):
+        """Apply LayerNorm on the channel dimension of a (B, C, H, W) tensor."""
+        return norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
+
+    def forward(self, x):
+        """Forward pass fusing two multi-scale feature maps.
+
+        Args:
+            x (list[torch.Tensor]): List of [x_kv, x_q].
+                x_kv: (B, c1, H_kv, W_kv) key/value features.
+                x_q:  (B, c2, H_q, W_q) query features; output resolution matches this.
+
+        Returns:
+            (torch.Tensor): Fused features of shape (B, c3, H_q, W_q).
+        """
+        x_kv, x_q = x
+        B = x_q.shape[0]
+        H_q, W_q = x_q.shape[2], x_q.shape[3]
+        H_kv, W_kv = x_kv.shape[2], x_kv.shape[3]
+        C = self._c2
+        heads = self.head_num
+        dim = self.head_dim
+
+        # Project both inputs to internal working dimension c2
+        kv = self.kv_proj(x_kv)
+        q_feat = self.q_proj(x_q)
+
+        # Normalize
+        q = self._apply_ln(q_feat, self.norm_q)
+        kv = self._apply_ln(kv, self.norm_kv)
+
+        if H_kv > H_q:
+            # DOWNSAMPLE: kv has higher spatial resolution than q.
+            # Fold kv into factor x factor spatial tokens per q position, then cross-attend.
+            factor = H_kv // H_q
+            # (B, C, H_q*f, W_q*f) -> (B, C, H_q, W_q, f*f)
+            kv = kv.reshape(B, C, H_q, factor, W_q, factor)
+            kv = kv.permute(0, 1, 2, 4, 3, 5).reshape(B, C, H_q, W_q, factor * factor)
+
+            # q: (B, heads, HW, 1, dim)
+            q_mh = q.reshape(B, heads, dim, H_q * W_q).permute(0, 1, 3, 2).unsqueeze(3)
+            # kv: (B, heads, HW, f*f, dim)
+            kv_mh = kv.reshape(B, heads, dim, H_q * W_q, factor * factor).permute(0, 1, 3, 4, 2)
+
+            # Cross-attention: (1, dim) @ (dim, f*f) -> (1, f*f), then (1, f*f) @ (f*f, dim) -> (1, dim)
+            attn = torch.matmul(q_mh, kv_mh.transpose(-2, -1)) * self.scale
+            attn = torch.softmax(attn, dim=-1)
+            out = torch.matmul(attn, kv_mh).squeeze(3)  # (B, heads, HW, dim)
+            out = out.permute(0, 1, 3, 2).reshape(B, C, H_q, W_q)
+
+        elif H_kv < H_q:
+            # UPSAMPLE: kv has lower spatial resolution than q.
+            # Expand kv to match q spatial size, then element-wise gated attention.
+            kv_up = F.interpolate(kv, size=(H_q, W_q), mode="nearest")
+
+            q_mh = q.reshape(B, heads, dim, H_q, W_q)
+            kv_mh = kv_up.reshape(B, heads, dim, H_q, W_q)
+
+            attn = (q_mh * kv_mh) * self.scale
+            attn = torch.sigmoid(attn)
+            out = attn * kv_mh
+            out = out.reshape(B, C, H_q, W_q)
+
+        else:
+            # Same resolution: element-wise attention
+            q_mh = q.reshape(B, heads, dim, H_q, W_q)
+            kv_mh = kv.reshape(B, heads, dim, H_q, W_q)
+
+            attn = (q_mh * kv_mh) * self.scale
+            attn = torch.sigmoid(attn)
+            out = attn * kv_mh
+            out = out.reshape(B, C, H_q, W_q)
+
+        # Residual connection + LayerNorm + output projection
+        out = self._apply_ln(out + q_feat, self.norm_out)
+        return self.out_proj(out)

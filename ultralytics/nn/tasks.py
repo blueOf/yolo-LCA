@@ -79,6 +79,7 @@ from ultralytics.nn.modules import (
     FastLocalDETR_PE,
     ConvWithAttention,
     FastLocalDETRBlock,
+    FusionBlock,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1995,6 +1996,14 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is FusionBlock:
+            c1 = ch[f[0]]  # kv input channels (already scaled)
+            c2_in = ch[f[1]]  # q input channels (already scaled)
+            c3 = args[0]  # output channels (needs scaling)
+            if c3 != nc:
+                c3 = make_divisible(min(c3, max_channels) * width, 8)
+            c2 = c3
+            args = [c1, c2_in, c3, *args[1:]]
         elif m in frozenset(
             {
                 Detect,
