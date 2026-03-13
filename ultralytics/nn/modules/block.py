@@ -3136,6 +3136,9 @@ class FusionBlock(nn.Module):
             head_num (int): Number of attention heads.
         """
         super().__init__()
+        # Ensure head_num evenly divides c2
+        while c2 % head_num != 0:
+            head_num -= 1
         self.kv_proj = Conv(c1, c2, 1)
         self.q_proj = Conv(c2, c2, 1)
         self.norm_q = nn.LayerNorm(c2)
@@ -3181,15 +3184,18 @@ class FusionBlock(nn.Module):
         if H_kv > H_q:
             # DOWNSAMPLE: kv has higher spatial resolution than q.
             # Fold kv into factor x factor spatial tokens per q position, then cross-attend.
-            factor = H_kv // H_q
-            # (B, C, H_q*f, W_q*f) -> (B, C, H_q, W_q, f*f)
-            kv = kv.reshape(B, C, H_q, factor, W_q, factor)
-            kv = kv.permute(0, 1, 2, 4, 3, 5).reshape(B, C, H_q, W_q, factor * factor)
+            # Requires H_kv and W_kv to be exact multiples of H_q and W_q respectively.
+            factor_h = H_kv // H_q
+            factor_w = W_kv // W_q
+            # (B, C, H_q*fh, W_q*fw) -> (B, C, H_q, W_q, fh*fw)
+            kv = kv.reshape(B, C, H_q, factor_h, W_q, factor_w)
+            kv = kv.permute(0, 1, 2, 4, 3, 5).reshape(B, C, H_q, W_q, factor_h * factor_w)
+            n_tokens = factor_h * factor_w
 
             # q: (B, heads, HW, 1, dim)
             q_mh = q.reshape(B, heads, dim, H_q * W_q).permute(0, 1, 3, 2).unsqueeze(3)
-            # kv: (B, heads, HW, f*f, dim)
-            kv_mh = kv.reshape(B, heads, dim, H_q * W_q, factor * factor).permute(0, 1, 3, 4, 2)
+            # kv: (B, heads, HW, n_tokens, dim)
+            kv_mh = kv.reshape(B, heads, dim, H_q * W_q, n_tokens).permute(0, 1, 3, 4, 2)
 
             # Cross-attention: (1, dim) @ (dim, f*f) -> (1, f*f), then (1, f*f) @ (f*f, dim) -> (1, dim)
             attn = torch.matmul(q_mh, kv_mh.transpose(-2, -1)) * self.scale
