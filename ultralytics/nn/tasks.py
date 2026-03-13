@@ -826,6 +826,112 @@ class RTDETRDetectionModel(DetectionModel):
         """
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
+    def load_pretrained_resnet_backbone(self, verbose=True):
+        """Load pretrained ResNet backbone weights from torchvision.
+
+        Maps torchvision ResNet state dict keys to the custom ResNetLayer/ResNetBasicBlock/ResNetBlock
+        module structure used by this model. This enables ImageNet-pretrained backbone initialization
+        for RT-DETR models with ResNet backbones, matching the approach used in the RT-DETR paper.
+
+        Args:
+            verbose (bool): Whether to log the transfer progress.
+        """
+        # Detect ResNet backbone configuration from YAML
+        backbone = self.yaml.get("backbone", [])
+        resnet_layers = []
+        expansion = 4  # default
+
+        for layer_cfg in backbone:
+            module_name = layer_cfg[2] if len(layer_cfg) > 2 else ""
+            if module_name != "ResNetLayer":
+                continue
+            args = layer_cfg[3]
+            is_first = args[3] if len(args) > 3 else False
+            if is_first:
+                continue  # stem layer, skip for block counting
+            n = args[4] if len(args) > 4 else 1
+            e = args[5] if len(args) > 5 else 4
+            expansion = e
+            resnet_layers.append(n)
+
+        if len(resnet_layers) != 4:
+            return  # Not a standard 4-stage ResNet backbone
+
+        # Map block configuration to torchvision model name
+        block_type = "basic" if expansion == 1 else "bottleneck"
+        n_blocks = tuple(resnet_layers)
+
+        resnet_configs = {
+            ((2, 2, 2, 2), 1): "resnet18",
+            ((3, 4, 6, 3), 1): "resnet34",
+            ((3, 4, 6, 3), 4): "resnet50",
+            ((3, 4, 23, 3), 4): "resnet101",
+            ((3, 8, 36, 3), 4): "resnet152",
+        }
+
+        model_name = resnet_configs.get((n_blocks, expansion))
+        if model_name is None:
+            return  # Unknown ResNet variant
+
+        try:
+            import torchvision
+
+            if hasattr(torchvision.models, "get_model"):
+                tv_model = torchvision.models.get_model(model_name, weights="DEFAULT")
+            else:
+                tv_model = torchvision.models.__dict__[model_name](pretrained=True)
+
+            tv_sd = tv_model.state_dict()
+            model_sd = self.state_dict()
+            mapped = {}
+            bn_params = ["weight", "bias", "running_mean", "running_var", "num_batches_tracked"]
+
+            def _map_conv_bn(tv_conv_key, tv_bn_key, model_path):
+                """Map a torchvision conv+bn pair to the custom Conv module weights."""
+                src = f"{tv_conv_key}.weight"
+                dst = f"{model_path}.conv.weight"
+                if src in tv_sd and dst in model_sd and tv_sd[src].shape == model_sd[dst].shape:
+                    mapped[dst] = tv_sd[src]
+                for p in bn_params:
+                    src = f"{tv_bn_key}.{p}"
+                    dst = f"{model_path}.bn.{p}"
+                    if src in tv_sd and dst in model_sd and tv_sd[src].shape == model_sd[dst].shape:
+                        mapped[dst] = tv_sd[src]
+
+            # Map stem weights (7x7 conv + bn)
+            _map_conv_bn("conv1", "bn1", "model.0.layer.0")
+
+            # Map residual layer weights
+            n_convs = 2 if block_type == "basic" else 3
+            for layer_idx in range(4):
+                for block_idx in range(n_blocks[layer_idx]):
+                    tv_prefix = f"layer{layer_idx + 1}.{block_idx}"
+                    model_prefix = f"model.{layer_idx + 1}.layer.{block_idx}"
+
+                    for conv_idx in range(1, n_convs + 1):
+                        _map_conv_bn(
+                            f"{tv_prefix}.conv{conv_idx}",
+                            f"{tv_prefix}.bn{conv_idx}",
+                            f"{model_prefix}.cv{conv_idx}",
+                        )
+
+                    # Map downsample/shortcut weights
+                    _map_conv_bn(
+                        f"{tv_prefix}.downsample.0",
+                        f"{tv_prefix}.downsample.1",
+                        f"{model_prefix}.shortcut.0",
+                    )
+
+            self.load_state_dict(mapped, strict=False)
+            if verbose:
+                LOGGER.info(
+                    f"Transferred {len(mapped)}/{len(model_sd)} items from "
+                    f"torchvision {model_name} pretrained backbone"
+                )
+        except Exception as e:
+            if verbose:
+                LOGGER.warning(f"WARNING ⚠️ Could not load pretrained {model_name} backbone weights: {e}")
+
     def _apply(self, fn):
         """Apply a function to all tensors in the model, including decoder anchors and valid mask.
 
