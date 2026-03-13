@@ -1,5 +1,0 @@
-setuptools
-numpy
-typing
-torch
-nvidia-dali-cuda110

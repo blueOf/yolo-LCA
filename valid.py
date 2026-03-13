@@ -43,19 +43,28 @@ def validate_on_svrdd(model, save_dir, device="0"):
     print(f"模型信息: {model_summary}\n")
 
     # SVRDD test 数据集配置文件路径
-    yaml_file = "datasets/SVRDD/svrdd_test.yaml"
-
+    # yaml_file = "datasets/SVRDD-tiff-v5/svrdd_test.yaml"
+    yaml_file = "/home/nkq/yolo26/datasets/SVRDD/svrdd_test.yaml"
     # 验证
-    results = model.val(
-        data=yaml_file,
-        imgsz=640,
-        batch=16,
-        device=device,
-        project=save_dir,
-        name="SVRDD_test",
-        save_json=True,
-        plots=True,
-    )
+    print("正在开始验证...")
+    f = io.StringIO()
+    with redirect_stdout(f):
+        results = model.val(
+            data=yaml_file,
+            imgsz=640,
+            batch=8,
+            device=device,
+            project=save_dir,
+            name="SVRDD_test",
+            save_json=True,
+            plots=True,
+            verbose=True,
+            # visualize=True,
+        )
+    val_output = f.getvalue()
+
+    # 在控制台打印捕获的输出
+    print(val_output)
 
     # 提取关键指标
     stage_times_ms = results.speed if isinstance(results.speed, dict) else {}
@@ -76,6 +85,26 @@ def validate_on_svrdd(model, save_dir, device="0"):
         ),
         "fps": fps,
         "model_summary": model_summary,
+        "val_output": val_output,  # 保存原始输出
+        # 新增曲线数据 (全类别平均)
+        "px": (
+            np.array(results.box.px).flatten() if hasattr(results.box, "px") else None
+        ),
+        "p_curve": (
+            results.box.p_curve.mean(0)
+            if hasattr(results.box, "p_curve") and len(results.box.p_curve) > 0
+            else None
+        ),
+        "r_curve": (
+            results.box.r_curve.mean(0)
+            if hasattr(results.box, "r_curve") and len(results.box.r_curve) > 0
+            else None
+        ),
+        "f1_curve": (
+            results.box.f1_curve.mean(0)
+            if hasattr(results.box, "f1_curve") and len(results.box.f1_curve) > 0
+            else None
+        ),
     }
 
     # 如果有类别指标，也保存
@@ -96,94 +125,52 @@ def validate_on_svrdd(model, save_dir, device="0"):
 
 def plot_validation_results(metrics, save_dir):
     """
-    绘制验证结果
-
-    Args:
-        metrics: 验证指标字典
-        save_dir: 图表保存目录
+    绘制验证结果，包含 P-R-F1 曲线和指标摘要表
     """
-    # 创建图表
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # 创建图表 (改为 1x2 布局: 左侧曲线图，右侧表格)
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7))
     fig.suptitle(
         "SVRDD/test Validation Results",
         fontsize=16,
         fontweight="bold",
     )
 
-    # 1. 主要指标柱状图
-    ax = axes[0, 0]
-    metric_names = ["mAP50", "mAP50-95", "Precision", "Recall", "F1-Score"]
-    metric_values = [
-        metrics["mAP50"],
-        metrics["mAP50-95"],
-        metrics["precision"],
-        metrics["recall"],
-        metrics["f1"],
-    ]
-    colors = ["#2E86AB", "#A23B72", "#F18F01", "#C73E1D", "#6A994E"]
-    bars = ax.bar(
-        metric_names, metric_values, color=colors, alpha=0.8, edgecolor="black"
-    )
-    ax.set_ylabel("Score", fontsize=11, fontweight="bold")
-    ax.set_title("Validation Metrics", fontsize=12, fontweight="bold")
-    ax.set_ylim([0, 1])
-    ax.grid(True, alpha=0.3, linestyle="--", axis="y")
+    # 1. P, R, F1 曲线图
+    ax = axes[0]
+    if metrics.get("px") is not None and metrics.get("p_curve") is not None:
+        px = metrics["px"]
+        ax.plot(px, metrics["p_curve"], color="#F18F01", label="Precision", linewidth=2)
+        ax.plot(px, metrics["r_curve"], color="#2E86AB", label="Recall", linewidth=2)
+        ax.plot(px, metrics["f1_curve"], color="#6A994E", label="F1-Score", linewidth=2)
 
-    # 添加数值标签
-    for bar, val in zip(bars, metric_values):
-        height = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width() / 2.0,
-            height,
-            f"{val:.4f}",
-            ha="center",
-            va="bottom",
+        # 寻找并标注 F1 最大值点
+        f1_mean = metrics["f1_curve"]
+        best_idx = np.argmax(f1_mean)
+        best_conf = px[best_idx]
+        best_f1 = f1_mean[best_idx]
+
+        ax.plot(best_conf, best_f1, "ro", markersize=6)
+        ax.annotate(
+            f"Best F1: {best_f1:.4f} @ {best_conf:.3f}",
+            xy=(best_conf, best_f1),
+            xytext=(best_conf, best_f1 + 0.05),
+            arrowprops=dict(facecolor="black", shrink=0.08, width=1, headwidth=5),
+            horizontalalignment="center",
             fontweight="bold",
         )
 
-    # 2. mAP50 vs mAP50-95
-    ax = axes[0, 1]
-    ap_metrics = ["mAP@0.5", "mAP@0.5:0.95"]
-    ap_values = [metrics["mAP50"], metrics["mAP50-95"]]
-    wedges, texts, autotexts = ax.pie(
-        ap_values,
-        labels=ap_metrics,
-        autopct="%1.4f",
-        colors=["#2E86AB", "#A23B72"],
-        startangle=90,
-        textprops={"fontsize": 10, "weight": "bold"},
-    )
-    ax.set_title("mAP Comparison", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Confidence", fontsize=11, fontweight="bold")
+        ax.set_ylabel("Score", fontsize=11, fontweight="bold")
+        ax.set_title("Performance Curves vs Confidence", fontsize=12, fontweight="bold")
+        ax.set_ylim([0, 1.05])
+        ax.set_xlim([0, 1])
+        ax.legend(loc="lower right")
+        ax.grid(True, alpha=0.3, linestyle="--")
+    else:
+        ax.text(0.5, 0.5, "Curve data not available", ha="center", va="center")
 
-    # 3. Precision & Recall
-    ax = axes[1, 0]
-    pr_metrics = ["Precision", "Recall"]
-    pr_values = [metrics["precision"], metrics["recall"]]
-    bars = ax.bar(
-        pr_metrics,
-        pr_values,
-        color=["#F18F01", "#C73E1D"],
-        alpha=0.8,
-        edgecolor="black",
-    )
-    ax.set_ylabel("Score", fontsize=11, fontweight="bold")
-    ax.set_title("Precision & Recall", fontsize=12, fontweight="bold")
-    ax.set_ylim([0, 1])
-    ax.grid(True, alpha=0.3, linestyle="--", axis="y")
-
-    for bar, val in zip(bars, pr_values):
-        height = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width() / 2.0,
-            height,
-            f"{val:.4f}",
-            ha="center",
-            va="bottom",
-            fontweight="bold",
-        )
-
-    # 4. 统计���要表格
-    ax = axes[1, 1]
+    # 2. 统计摘要表格
+    ax = axes[1]
     ax.axis("off")
 
     summary_data = [
@@ -193,13 +180,13 @@ def plot_validation_results(metrics, save_dir):
         ["Precision", f"{metrics['precision']:.6f}"],
         ["Recall", f"{metrics['recall']:.6f}"],
         ["F1-Score", f"{metrics['f1']:.6f}"],
-        ["FPS", f"{metrics. get('fps', 0):.2f}"],
+        ["FPS", f"{metrics.get('fps', 0):.2f}"],
     ]
 
     table = ax.table(cellText=summary_data, loc="center", cellLoc="center")
     table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 2.5)
+    table.set_fontsize(11)
+    table.scale(0.8, 2.5)
 
     # 设置表头样式
     for i in range(2):
@@ -226,7 +213,7 @@ def plot_validation_results(metrics, save_dir):
         wrap=True,
     )
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
 
     # 保存图表
     plot_path = os.path.join(save_dir, "validation_results.png")
@@ -237,14 +224,17 @@ def plot_validation_results(metrics, save_dir):
 
 def save_results_to_csv(metrics, save_dir):
     """
-    将结果保存为CSV文件
-
-    Args:
-        metrics: 验证指标字典
-        save_dir: 保存目录
+    将结果保存为CSV文件，仅保存标量指标
     """
+    # 过滤掉数组型数据
+    scalar_metrics = {
+        k: v
+        for k, v in metrics.items()
+        if not isinstance(v, (np.ndarray, list)) or k == "dataset"
+    }
+
     # 创建DataFrame
-    df = pd.DataFrame([metrics])
+    df = pd.DataFrame([scalar_metrics])
 
     csv_path = os.path.join(save_dir, "validation_results.csv")
     df.to_csv(csv_path, index=False, float_format="%.6f")
@@ -262,7 +252,10 @@ def main():
         help="运行设备 (默认：0，即GPU 0；可选：cpu, 0, 1, 2等)",
     )
     parser.add_argument(
-        "--save-dir", type=str, default="valid", help="验证结果保存目录（默认：valid）"
+        "--save-dir",
+        type=str,
+        default="/home/nkq/yolo11/valid",
+        help="验证结果保存目录（默认：valid）",
     )
 
     args = parser.parse_args()
