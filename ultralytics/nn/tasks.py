@@ -839,7 +839,7 @@ class RTDETRDetectionModel(DetectionModel):
         # Detect ResNet backbone configuration from YAML
         backbone = self.yaml.get("backbone", [])
         resnet_layers = []
-        expansion = 4  # default
+        expansion = None
 
         for layer_cfg in backbone:
             module_name = layer_cfg[2] if len(layer_cfg) > 2 else ""
@@ -854,7 +854,7 @@ class RTDETRDetectionModel(DetectionModel):
             expansion = e
             resnet_layers.append(n)
 
-        if len(resnet_layers) != 4:
+        if len(resnet_layers) != 4 or expansion is None:
             return  # Not a standard 4-stage ResNet backbone
 
         # Map block configuration to torchvision model name
@@ -890,13 +890,19 @@ class RTDETRDetectionModel(DetectionModel):
                 """Map a torchvision conv+bn pair to the custom Conv module weights."""
                 src = f"{tv_conv_key}.weight"
                 dst = f"{model_path}.conv.weight"
-                if src in tv_sd and dst in model_sd and tv_sd[src].shape == model_sd[dst].shape:
-                    mapped[dst] = tv_sd[src]
+                if src in tv_sd and dst in model_sd:
+                    if tv_sd[src].shape == model_sd[dst].shape:
+                        mapped[dst] = tv_sd[src]
+                    elif verbose:
+                        LOGGER.warning(f"Shape mismatch for {src}: {tv_sd[src].shape} vs {model_sd[dst].shape}")
                 for p in bn_params:
                     src = f"{tv_bn_key}.{p}"
                     dst = f"{model_path}.bn.{p}"
-                    if src in tv_sd and dst in model_sd and tv_sd[src].shape == model_sd[dst].shape:
-                        mapped[dst] = tv_sd[src]
+                    if src in tv_sd and dst in model_sd:
+                        if tv_sd[src].shape == model_sd[dst].shape:
+                            mapped[dst] = tv_sd[src]
+                        elif verbose:
+                            LOGGER.warning(f"Shape mismatch for {src}: {tv_sd[src].shape} vs {model_sd[dst].shape}")
 
             # Map stem weights (7x7 conv + bn)
             _map_conv_bn("conv1", "bn1", "model.0.layer.0")
