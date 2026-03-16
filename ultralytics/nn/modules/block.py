@@ -3117,9 +3117,11 @@ class FusionBlock(nn.Module):
     All normalization is handled by BatchNorm2d inside Conv (native NCHW, no permutations).
 
     Attributes:
-        kv_proj (Conv): 1x1 convolution projecting kv input to working channel dimension (BN, no act).
-        q_proj (Conv): 1x1 convolution projecting q input to working channel dimension (BN, no act).
-        out_proj (Conv): 1x1 convolution projecting to output channels (BN + SiLU).
+        kv_proj (Conv): 1x1 Conv2d + BatchNorm2d projecting kv input to working dimension (no activation).
+        q_proj (Conv): 1x1 Conv2d + BatchNorm2d projecting q input to working dimension (no activation).
+            The linear (activation-free) q projection also serves as the residual shortcut, providing
+            clean gradient flow similar to standard residual blocks.
+        out_proj (Conv): 1x1 Conv2d + BatchNorm2d + SiLU projecting fused features to output channels.
     """
 
     def __init__(self, c1, c2, c3, head_num=4):
