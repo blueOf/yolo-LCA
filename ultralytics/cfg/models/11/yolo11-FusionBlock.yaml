@@ -1,9 +1,10 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-# YOLO11 with FusionBlock - replaces Upsample/Downsample + Concat + C3k2 with cross-attention fusion
-# FusionBlock fuses two multi-scale feature maps using attention:
-#   - Downsample direction: cross-attention with factor x factor spatial tokens
-#   - Upsample direction: element-wise gated attention after nearest-neighbor expansion
+# YOLO11 with FusionBlock - replaces Upsample/Downsample + Concat + C3k2 with gated-attention fusion
+# FusionBlock fuses two multi-scale feature maps using element-wise gated attention:
+#   - Downsample direction: adaptive avg pooling + gated attention
+#   - Upsample direction: nearest-neighbor interpolation + gated attention
+# All normalization uses BatchNorm2d inside Conv (native NCHW, no permutation overhead).
 
 # Parameters
 nc: 80 # number of classes
