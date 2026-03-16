@@ -1,0 +1,51 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# YOLO11 with FastLocalDETR backbone + FusionBlock head
+# FusionBlock replaces Upsample/Downsample + Concat + C3k2 with gated-attention fusion:
+#   - Downsample direction: adaptive avg pooling + gated attention
+#   - Upsample direction: nearest-neighbor interpolation + gated attention
+# All normalization uses BatchNorm2d inside Conv (native NCHW, no permutation overhead).
+
+# Parameters
+nc: 80 # number of classes
+scales: # model compound scaling constants
+  # [depth, width, max_channels]
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+# YOLO11n backbone with FastLocalDETR
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 2, C3k2, [256, False, 0.25]]
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 1, FastLocalDETR, [256, 1]]
+  - [-1, 2, C3k2, [512, False, 0.25]]
+  - [-1, 1, Conv, [512, 3, 2]] # 6-P4/16
+  - [-1, 2, C3k2, [512, True]]
+  - [-1, 1, Conv, [1024, 3, 2]] # 8-P5/32
+  - [-1, 2, C3k2, [1024, True]]
+  - [-1, 1, SPPF, [1024, 5]] # 10
+  - [-1, 2, C2PSA, [1024]] # 11
+
+# YOLO11n head with FusionBlock
+head:
+  # Top-down (upsample) path
+  # kv=11 (20x20, P5 deep features), q=7 (40x40, P4 backbone skip) -> 40x40
+  - [[11, 7], 1, FusionBlock, [512]] # 12
+
+  # kv=12 (40x40, fused P5+P4), q=5 (80x80, P3 backbone skip) -> 80x80
+  - [[12, 5], 1, FusionBlock, [256]] # 13 (P3/8-small)
+
+  # Bottom-up (downsample) path
+  # kv=13 (80x80, fused P3), q=12 (40x40, fused P4) -> 40x40
+  - [[13, 12], 1, FusionBlock, [512]] # 14 (P4/16-medium)
+
+  # kv=14 (40x40, fused P4), q=11 (20x20, P5 deep features) -> 20x20
+  - [[14, 11], 1, FusionBlock, [1024]] # 15 (P5/32-large)
+
+  - [[13, 14, 15], 1, Detect, [nc]] # Detect(P3, P4, P5)
