@@ -2710,7 +2710,9 @@ class FastLocalDETR(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
+        L = H * W
         Np = self.kernel_size**2
+        d = C // self.head_num
 
         x = (
             self.input_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
@@ -2724,43 +2726,53 @@ class FastLocalDETR(nn.Module):
         center_idx = (Np - 1) // 2
         for layer in self.encoder_layers:
             qkv = layer["qkv_conv"](cur_x)  # (B, 3C, H, W)
-            qkv_nb = self.unfold(qkv).view(B, 3, C, Np, H * W)
-            q_nb = qkv_nb[:, 0].permute(0, 3, 1, 2).reshape(-1, Np, C)  # (B*L, Np, C)
-            k_nb = qkv_nb[:, 1].permute(0, 3, 1, 2).reshape(-1, Np, C)
-            v_nb = qkv_nb[:, 2].permute(0, 3, 1, 2).reshape(-1, Np, C)
+            # 单次 permute+contiguous 完成所有头分割，减少内存复制次数
+            qkv_heads = (
+                self.unfold(qkv)                       # (B, 3C*Np, L)
+                .view(B, 3, self.head_num, d, Np, L)
+                .permute(1, 0, 5, 2, 4, 3)             # (3, B, L, head, Np, d)
+                .contiguous()
+                .view(3, B * L, self.head_num, Np, d)
+            )
+            q_nb, k_nb, v_nb = qkv_heads.unbind(0)    # 每个 (B*L, head, Np, d)，连续内存
 
-            q_nb = q_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            k_nb = k_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
-            attn = F.softmax(attn, dim=-1)
-
-            v_nb = v_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            nb_encoded = (attn @ v_nb).transpose(1, 2).reshape(-1, Np, C)
-            nb_encoded = layer["norm_sa"](nb_encoded)
+            # 融合注意力算子（支持 Flash Attention 等后端），不随 head_num 线性增长
+            attn_out = F.scaled_dot_product_attention(q_nb, k_nb, v_nb)  # (B*L, head, Np, d)
+            nb_encoded = layer["norm_sa"](
+                attn_out.permute(0, 2, 1, 3).reshape(B * L, Np, C)
+            )  # (B*L, Np, C)
 
             # 取中心位置特征更新空间特征图，作为下一层编码器的输入
             cur_x = (
-                nb_encoded.view(B, H * W, Np, C)[:, :, center_idx, :]
-                .transpose(1, 2)
-                .view(B, C, H, W)
+                nb_encoded[:, center_idx]   # (B*L, C)
+                .view(B, L, C)
+                .permute(0, 2, 1)           # (B, C, L)
                 .contiguous()
+                .view(B, C, H, W)
             )
+
+        # 预计算解码器所需的 K/V（头分割格式），避免循环内重复布局转换
+        nb_encoded_kv = (
+            nb_encoded
+            .view(B * L, Np, self.head_num, d)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )  # (B*L, head, Np, d)
 
         # --- 解码阶段：N 层，使用原始 center_x 作为 Q，最终编码输出作为 K/V ---
         center_x = original_center_x
         for layer in self.decoder_layers:
+            # 直接 view 到头分割格式，省去一次 transpose
+            # 预乘 head_num**-0.5 使等效缩放为 C**-0.5（与原实现一致）
             qc = (
                 layer["q_center"](center_x)
-                .view(-1, 1, self.head_num, C // self.head_num)
-                .transpose(1, 2)
-            )
-            kc = nb_encoded.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )
-            vc = kc
-
-            attn_c = F.softmax((qc @ kc.transpose(-2, -1)) * (C**-0.5), dim=-1)
-            ca_out = (attn_c @ vc).transpose(1, 2).reshape(B, H * W, C)
+                .view(B * L, self.head_num, 1, d)
+                * (self.head_num**-0.5)
+            )  # (B*L, head, 1, d)
+            ca_out = (
+                F.scaled_dot_product_attention(qc, nb_encoded_kv, nb_encoded_kv)
+                .reshape(B, L, C)
+            )  # (B, L, C)
 
             center_x = layer["norm_ca"](center_x + ca_out)
             center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
@@ -2818,7 +2830,9 @@ class FastLocalDETRBlock(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
+        L = H * W
         Np = self.kernel_size**2
+        d = C // self.head_num
 
         x = (
             self.input_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
@@ -2832,43 +2846,53 @@ class FastLocalDETRBlock(nn.Module):
         center_idx = (Np - 1) // 2
         for layer in self.encoder_layers:
             qkv = layer["qkv_conv"](cur_x)  # (B, 3C, H, W)
-            qkv_nb = self.unfold(qkv).view(B, 3, C, Np, H * W)
-            q_nb = qkv_nb[:, 0].permute(0, 3, 1, 2).reshape(-1, Np, C)  # (B*L, Np, C)
-            k_nb = qkv_nb[:, 1].permute(0, 3, 1, 2).reshape(-1, Np, C)
-            v_nb = qkv_nb[:, 2].permute(0, 3, 1, 2).reshape(-1, Np, C)
+            # 单次 permute+contiguous 完成所有头分割，减少内存复制次数
+            qkv_heads = (
+                self.unfold(qkv)                       # (B, 3C*Np, L)
+                .view(B, 3, self.head_num, d, Np, L)
+                .permute(1, 0, 5, 2, 4, 3)             # (3, B, L, head, Np, d)
+                .contiguous()
+                .view(3, B * L, self.head_num, Np, d)
+            )
+            q_nb, k_nb, v_nb = qkv_heads.unbind(0)    # 每个 (B*L, head, Np, d)，连续内存
 
-            q_nb = q_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            k_nb = k_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
-            attn = F.softmax(attn, dim=-1)
-
-            v_nb = v_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            nb_encoded = (attn @ v_nb).transpose(1, 2).reshape(-1, Np, C)
-            nb_encoded = layer["norm_sa"](nb_encoded)
+            # 融合注意力算子（支持 Flash Attention 等后端），不随 head_num 线性增长
+            attn_out = F.scaled_dot_product_attention(q_nb, k_nb, v_nb)  # (B*L, head, Np, d)
+            nb_encoded = layer["norm_sa"](
+                attn_out.permute(0, 2, 1, 3).reshape(B * L, Np, C)
+            )  # (B*L, Np, C)
 
             # 取中心位置特征更新空间特征图，作为下一层编码器的输入
             cur_x = (
-                nb_encoded.view(B, H * W, Np, C)[:, :, center_idx, :]
-                .transpose(1, 2)
-                .view(B, C, H, W)
+                nb_encoded[:, center_idx]   # (B*L, C)
+                .view(B, L, C)
+                .permute(0, 2, 1)           # (B, C, L)
                 .contiguous()
+                .view(B, C, H, W)
             )
+
+        # 预计算解码器所需的 K/V（头分割格式），避免循环内重复布局转换
+        nb_encoded_kv = (
+            nb_encoded
+            .view(B * L, Np, self.head_num, d)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )  # (B*L, head, Np, d)
 
         # --- 解码阶段：N 层，使用原始 center_x 作为 Q，最终编码输出作为 K/V ---
         center_x = original_center_x
         for layer in self.decoder_layers:
+            # 直接 view 到头分割格式，省去一次 transpose
+            # 预乘 head_num**-0.5 使等效缩放为 C**-0.5（与原实现一致）
             qc = (
                 layer["q_center"](center_x)
-                .view(-1, 1, self.head_num, C // self.head_num)
-                .transpose(1, 2)
-            )
-            kc = nb_encoded.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )
-            vc = kc
-
-            attn_c = F.softmax((qc @ kc.transpose(-2, -1)) * (C**-0.5), dim=-1)
-            ca_out = (attn_c @ vc).transpose(1, 2).reshape(B, H * W, C)
+                .view(B * L, self.head_num, 1, d)
+                * (self.head_num**-0.5)
+            )  # (B*L, head, 1, d)
+            ca_out = (
+                F.scaled_dot_product_attention(qc, nb_encoded_kv, nb_encoded_kv)
+                .reshape(B, L, C)
+            )  # (B, L, C)
 
             center_x = layer["norm_ca"](center_x + ca_out)
             center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
@@ -2997,7 +3021,10 @@ class FastLocalDETR_PE(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
+        L = H * W
         Np = self.kernel_size**2
+        d = C // self.head_num
+        center_idx = (Np - 1) // 2
 
         x = (
             self.input_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
@@ -3006,61 +3033,66 @@ class FastLocalDETR_PE(nn.Module):
         pos_embed = self.row_pos_embed + self.col_pos_embed  # (Np, C)
 
         # 保存原始 center_x（含中心位置编码）作为解码器的初始 Q
-        original_center_x = x.flatten(2).transpose(1, 2)  # (B, L, C)
-        original_center_x = original_center_x + pos_embed[(Np - 1) // 2, :]  # 添加中心位置编码
+        original_center_x = x.flatten(2).transpose(1, 2) + pos_embed[center_idx]  # (B, L, C)
+
+        # 预计算位置偏置的广播形状 (1, 1, C, Np, 1)，供编码器首层注入
+        pos_bias = pos_embed.t().unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # (1, 1, C, Np, 1)
 
         # --- 编码阶段：N 层，每层输出作为下一层的 Q/K/V ---
         cur_x = x
-        center_idx = (Np - 1) // 2
         for i, layer in enumerate(self.encoder_layers):
             qkv = layer["qkv_conv"](cur_x)  # (B, 3C, H, W)
-            qkv_nb = (
-                self.unfold(qkv)
-                .view(B, 3, C, Np, H * W)
-                .permute(0, 1, 4, 3, 2)
-                .contiguous()
-            )  # (B, 3, L, Np, C)
-
-            # 只在第一层编码时添加位置编码
+            # 在头分割前注入位置编码（仅首层），避免额外布局转换开销
+            unfolded_3C = self.unfold(qkv).view(B, 3, C, Np, L)  # 零复制 view
             if i == 0:
-                qkv_nb = qkv_nb + pos_embed
+                unfolded_3C = unfolded_3C + pos_bias  # 广播加法，结果连续
+            # 单次 permute+contiguous 完成所有头分割，减少内存复制次数
+            qkv_heads = (
+                unfolded_3C
+                .view(B, 3, self.head_num, d, Np, L)
+                .permute(1, 0, 5, 2, 4, 3)             # (3, B, L, head, Np, d)
+                .contiguous()
+                .view(3, B * L, self.head_num, Np, d)
+            )
+            q_nb, k_nb, v_nb = qkv_heads.unbind(0)    # 每个 (B*L, head, Np, d)，连续内存
 
-            q_nb = qkv_nb[:, 0].reshape(-1, Np, C)  # (B*L, Np, C)
-            k_nb = qkv_nb[:, 1].reshape(-1, Np, C)
-            v_nb = qkv_nb[:, 2].reshape(-1, Np, C)
-
-            q_nb = q_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            k_nb = k_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
-            attn = F.softmax(attn, dim=-1)
-
-            v_nb = v_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            nb_encoded = (attn @ v_nb).transpose(1, 2).reshape(-1, Np, C)
-            nb_encoded = layer["norm_sa"](nb_encoded)
+            # 融合注意力算子（支持 Flash Attention 等后端），不随 head_num 线性增长
+            attn_out = F.scaled_dot_product_attention(q_nb, k_nb, v_nb)  # (B*L, head, Np, d)
+            nb_encoded = layer["norm_sa"](
+                attn_out.permute(0, 2, 1, 3).reshape(B * L, Np, C)
+            )  # (B*L, Np, C)
 
             # 取中心位置特征更新空间特征图，作为下一层编码器的输入
             cur_x = (
-                nb_encoded.view(B, H * W, Np, C)[:, :, center_idx, :]
-                .transpose(1, 2)
-                .view(B, C, H, W)
+                nb_encoded[:, center_idx]   # (B*L, C)
+                .view(B, L, C)
+                .permute(0, 2, 1)           # (B, C, L)
                 .contiguous()
+                .view(B, C, H, W)
             )
+
+        # 预计算解码器所需的 K/V（头分割格式），避免循环内重复布局转换
+        nb_encoded_kv = (
+            nb_encoded
+            .view(B * L, Np, self.head_num, d)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )  # (B*L, head, Np, d)
 
         # --- 解码阶段：N 层，使用原始 center_x 作为 Q，最终编码输出作为 K/V ---
         center_x = original_center_x
         for layer in self.decoder_layers:
+            # 直接 view 到头分割格式，省去一次 transpose
+            # 预乘 head_num**-0.5 使等效缩放为 C**-0.5（与原实现一致）
             qc = (
                 layer["q_center"](center_x)
-                .view(-1, 1, self.head_num, C // self.head_num)
-                .transpose(1, 2)
-            )
-            kc = nb_encoded.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )
-            vc = kc
-
-            attn_c = F.softmax((qc @ kc.transpose(-2, -1)) * (C**-0.5), dim=-1)
-            ca_out = (attn_c @ vc).transpose(1, 2).reshape(B, H * W, C)
+                .view(B * L, self.head_num, 1, d)
+                * (self.head_num**-0.5)
+            )  # (B*L, head, 1, d)
+            ca_out = (
+                F.scaled_dot_product_attention(qc, nb_encoded_kv, nb_encoded_kv)
+                .reshape(B, L, C)
+            )  # (B, L, C)
 
             center_x = layer["norm_ca"](center_x + ca_out)
             center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
