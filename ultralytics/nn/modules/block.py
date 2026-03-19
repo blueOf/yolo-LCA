@@ -2736,10 +2736,14 @@ class FastLocalDETR(nn.Module):
             )
             q_nb, k_nb, v_nb = qkv_heads.unbind(0)    # 每个 (B*L, head, Np, d)，连续内存
 
-            # 融合注意力算子（支持 Flash Attention 等后端），不随 head_num 线性增长
-            attn_out = F.scaled_dot_product_attention(q_nb, k_nb, v_nb)  # (B*L, head, Np, d)
+            # 手动多头注意力：Flash Attention 要求序列长度对齐（64/128），Np=25 不满足，
+            # 且 B*L 极大时会超出 CUDA 内核网格限制，故保留显式算子；
+            # 一步融合避免保留中间注意力矩阵
+            attn_out = (
+                (q_nb @ k_nb.transpose(-2, -1)) * (d ** -0.5)
+            ).softmax(dim=-1) @ v_nb                               # (B*L, head, Np, d)
             nb_encoded = layer["norm_sa"](
-                attn_out.permute(0, 2, 1, 3).reshape(B * L, Np, C)
+                attn_out.transpose(1, 2).reshape(B * L, Np, C)
             )  # (B*L, Np, C)
 
             # 取中心位置特征更新空间特征图，作为下一层编码器的输入
@@ -2762,15 +2766,13 @@ class FastLocalDETR(nn.Module):
         # --- 解码阶段：N 层，使用原始 center_x 作为 Q，最终编码输出作为 K/V ---
         center_x = original_center_x
         for layer in self.decoder_layers:
-            # 直接 view 到头分割格式，省去一次 transpose
-            # 预乘 head_num**-0.5 使等效缩放为 C**-0.5（与原实现一致）
-            qc = (
-                layer["q_center"](center_x)
-                .view(B * L, self.head_num, 1, d)
-                * (self.head_num**-0.5)
-            )  # (B*L, head, 1, d)
+            # 直接 view 到头分割格式，省去一次 transpose；
+            # 原始实现以 C**-0.5 (= (head_num*d)**-0.5) 为缩放因子（非标准 d**-0.5），此处保持一致
+            qc = layer["q_center"](center_x).view(B * L, self.head_num, 1, d)
+            attn_c = (qc @ nb_encoded_kv.transpose(-2, -1)) * (C ** -0.5)  # (B*L, head, 1, Np)
             ca_out = (
-                F.scaled_dot_product_attention(qc, nb_encoded_kv, nb_encoded_kv)
+                (attn_c.softmax(dim=-1) @ nb_encoded_kv)  # (B*L, head, 1, d)
+                .transpose(1, 2)
                 .reshape(B, L, C)
             )  # (B, L, C)
 
@@ -2856,10 +2858,14 @@ class FastLocalDETRBlock(nn.Module):
             )
             q_nb, k_nb, v_nb = qkv_heads.unbind(0)    # 每个 (B*L, head, Np, d)，连续内存
 
-            # 融合注意力算子（支持 Flash Attention 等后端），不随 head_num 线性增长
-            attn_out = F.scaled_dot_product_attention(q_nb, k_nb, v_nb)  # (B*L, head, Np, d)
+            # 手动多头注意力：Flash Attention 要求序列长度对齐（64/128），Np=25 不满足，
+            # 且 B*L 极大时会超出 CUDA 内核网格限制，故保留显式算子；
+            # 一步融合避免保留中间注意力矩阵
+            attn_out = (
+                (q_nb @ k_nb.transpose(-2, -1)) * (d ** -0.5)
+            ).softmax(dim=-1) @ v_nb                               # (B*L, head, Np, d)
             nb_encoded = layer["norm_sa"](
-                attn_out.permute(0, 2, 1, 3).reshape(B * L, Np, C)
+                attn_out.transpose(1, 2).reshape(B * L, Np, C)
             )  # (B*L, Np, C)
 
             # 取中心位置特征更新空间特征图，作为下一层编码器的输入
@@ -2882,15 +2888,13 @@ class FastLocalDETRBlock(nn.Module):
         # --- 解码阶段：N 层，使用原始 center_x 作为 Q，最终编码输出作为 K/V ---
         center_x = original_center_x
         for layer in self.decoder_layers:
-            # 直接 view 到头分割格式，省去一次 transpose
-            # 预乘 head_num**-0.5 使等效缩放为 C**-0.5（与原实现一致）
-            qc = (
-                layer["q_center"](center_x)
-                .view(B * L, self.head_num, 1, d)
-                * (self.head_num**-0.5)
-            )  # (B*L, head, 1, d)
+            # 直接 view 到头分割格式，省去一次 transpose；
+            # 原始实现以 C**-0.5 (= (head_num*d)**-0.5) 为缩放因子（非标准 d**-0.5），此处保持一致
+            qc = layer["q_center"](center_x).view(B * L, self.head_num, 1, d)
+            attn_c = (qc @ nb_encoded_kv.transpose(-2, -1)) * (C ** -0.5)  # (B*L, head, 1, Np)
             ca_out = (
-                F.scaled_dot_product_attention(qc, nb_encoded_kv, nb_encoded_kv)
+                (attn_c.softmax(dim=-1) @ nb_encoded_kv)  # (B*L, head, 1, d)
+                .transpose(1, 2)
                 .reshape(B, L, C)
             )  # (B, L, C)
 
@@ -3056,10 +3060,14 @@ class FastLocalDETR_PE(nn.Module):
             )
             q_nb, k_nb, v_nb = qkv_heads.unbind(0)    # 每个 (B*L, head, Np, d)，连续内存
 
-            # 融合注意力算子（支持 Flash Attention 等后端），不随 head_num 线性增长
-            attn_out = F.scaled_dot_product_attention(q_nb, k_nb, v_nb)  # (B*L, head, Np, d)
+            # 手动多头注意力：Flash Attention 要求序列长度对齐（64/128），Np=25 不满足，
+            # 且 B*L 极大时会超出 CUDA 内核网格限制，故保留显式算子；
+            # 一步融合避免保留中间注意力矩阵
+            attn_out = (
+                (q_nb @ k_nb.transpose(-2, -1)) * (d ** -0.5)
+            ).softmax(dim=-1) @ v_nb                               # (B*L, head, Np, d)
             nb_encoded = layer["norm_sa"](
-                attn_out.permute(0, 2, 1, 3).reshape(B * L, Np, C)
+                attn_out.transpose(1, 2).reshape(B * L, Np, C)
             )  # (B*L, Np, C)
 
             # 取中心位置特征更新空间特征图，作为下一层编码器的输入
@@ -3082,15 +3090,13 @@ class FastLocalDETR_PE(nn.Module):
         # --- 解码阶段：N 层，使用原始 center_x 作为 Q，最终编码输出作为 K/V ---
         center_x = original_center_x
         for layer in self.decoder_layers:
-            # 直接 view 到头分割格式，省去一次 transpose
-            # 预乘 head_num**-0.5 使等效缩放为 C**-0.5（与原实现一致）
-            qc = (
-                layer["q_center"](center_x)
-                .view(B * L, self.head_num, 1, d)
-                * (self.head_num**-0.5)
-            )  # (B*L, head, 1, d)
+            # 直接 view 到头分割格式，省去一次 transpose；
+            # 原始实现以 C**-0.5 (= (head_num*d)**-0.5) 为缩放因子（非标准 d**-0.5），此处保持一致
+            qc = layer["q_center"](center_x).view(B * L, self.head_num, 1, d)
+            attn_c = (qc @ nb_encoded_kv.transpose(-2, -1)) * (C ** -0.5)  # (B*L, head, 1, Np)
             ca_out = (
-                F.scaled_dot_product_attention(qc, nb_encoded_kv, nb_encoded_kv)
+                (attn_c.softmax(dim=-1) @ nb_encoded_kv)  # (B*L, head, 1, d)
+                .transpose(1, 2)
                 .reshape(B, L, C)
             )  # (B, L, C)
 
