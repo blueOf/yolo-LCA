@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import math
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,6 +14,8 @@ from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
+
+MIN_RECOMMENDED_HEAD_DIM = 8
 
 __all__ = (
     "C1",
@@ -3237,8 +3242,17 @@ class FusionBlockv2(nn.Module):
 
     def __init__(self, c1, c2, c3, c4=None, head_num=4):
         super().__init__()
-        while c2 % head_num != 0 and head_num > 1:
-            head_num -= 1
+        if c2 <= 0:
+            raise ValueError(f"c2 must be positive, got {c2}.")
+        if head_num <= 0:
+            raise ValueError(f"head_num must be positive, got {head_num}.")
+        adjusted_head_num = math.gcd(c2, head_num)
+        if adjusted_head_num != head_num:
+            warnings.warn(
+                f"FusionBlockv2 adjusted head_num from {head_num} to {adjusted_head_num} to divide c2={c2}.",
+                stacklevel=2,
+            )
+        head_num = adjusted_head_num
         self.p1_proj = Conv(c1, c2, 1, act=False)
         self.p2_proj = Conv(c2, c2, 1, act=False)
         self.p3_proj = Conv(c3, c2, 1, act=False)
@@ -3248,15 +3262,24 @@ class FusionBlockv2(nn.Module):
         self.k3 = nn.Parameter(torch.tensor(1.0))
         self.head_num = head_num
         self.head_dim = c2 // head_num
+        if self.head_dim < MIN_RECOMMENDED_HEAD_DIM:
+            warnings.warn(
+                f"FusionBlockv2 head_dim is small ({self.head_dim}); consider using larger c2 or fewer heads.",
+                stacklevel=2,
+            )
         self.scale = self.head_dim**-0.5
 
     @staticmethod
-    def _to_blocks(x, base_h, base_w):
+    def _to_blocks(x, base_h, base_w, name="input"):
         """Convert (B, C, H, W) to (B, base_h, base_w, tokens_per_block, C)."""
         b, c, h, w = x.shape
         assert (
             h % base_h == 0 and w % base_w == 0
-        ), f"Feature map size {(h, w)} must be divisible by base size {(base_h, base_w)}."
+        ), (
+            f"{name} feature map size {(h, w)} must be divisible by base grid size "
+            f"{(base_h, base_w)}; got factors "
+            f"({h / base_h:.3f}, {w / base_w:.3f})."
+        )
         fh, fw = h // base_h, w // base_w
         return (
             x.reshape(b, c, base_h, fh, base_w, fw)
@@ -3296,9 +3319,9 @@ class FusionBlockv2(nn.Module):
         p3 = self.p3_proj(x3)
 
         base_h, base_w = p3.shape[2], p3.shape[3]
-        t1 = self._to_blocks(p1, base_h, base_w)
-        t2 = self._to_blocks(p2, base_h, base_w)
-        t3 = self._to_blocks(p3, base_h, base_w)
+        t1 = self._to_blocks(p1, base_h, base_w, name="x1")
+        t2 = self._to_blocks(p2, base_h, base_w, name="x2")
+        t3 = self._to_blocks(p3, base_h, base_w, name="x3")
 
         out_tokens = (
             self.k1 * t1 + self.k2 * self._cross_attention(t1, t2) + self.k3 * self._cross_attention(t1, t3)
