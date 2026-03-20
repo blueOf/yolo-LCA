@@ -1,5 +1,5 @@
 from ultralytics import YOLO
-from ultralytics.nn.modules import Conv
+from ultralytics.nn.modules import Conv, FusionBlockv2
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -479,3 +479,11 @@ if __name__ == "__main__":
 
     out = block(x)
     print(f"Output shape: {out.shape}")
+
+    fusion_v2 = FusionBlockv2(c1=64, c2=128, c3=256, c4=128, head_num=4)
+    f1 = torch.randn((1, 64, 80, 80))
+    f2 = torch.randn((1, 128, 40, 40))
+    f3 = torch.randn((1, 256, 20, 20))
+    f_out = fusion_v2([f1, f2, f3])
+    print(f"FusionBlockv2 output shape: {f_out.shape}")
+    assert f_out.shape == (1, 128, 80, 80)
