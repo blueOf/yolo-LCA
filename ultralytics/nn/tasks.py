@@ -80,6 +80,7 @@ from ultralytics.nn.modules import (
     ConvWithAttention,
     FastLocalDETRBlock,
     FusionBlock,
+    SpatialMeanCenter,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
