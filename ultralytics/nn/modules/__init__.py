@@ -68,6 +68,7 @@ from .block import (
     FastLocalDETRBlock,
     FusionBlock,
     FusionBlockv2,
+    FusionBlockv3,
 )
 from .conv import (
     CBAM,
@@ -198,4 +199,5 @@ __all__ = (
     "v10Detect",
     "FusionBlock",
     "FusionBlockv2",
+    "FusionBlockv3",
 )

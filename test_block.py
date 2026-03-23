@@ -1,5 +1,5 @@
 from ultralytics import YOLO
-from ultralytics.nn.modules import Conv, FusionBlockv2
+from ultralytics.nn.modules import Conv, FusionBlockv2, FusionBlockv3
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -505,3 +505,12 @@ if __name__ == "__main__":
     except AssertionError as e:
         got_expected_assert = "x1 feature map size" in str(e)
     assert got_expected_assert
+
+    fusion_v3 = FusionBlockv3(c1=64, c2=128, c3=256, c4=128, head_num=4)
+    f_out_v3 = fusion_v3([f1, f2, f3])
+    print(f"FusionBlockv3 output shape: {f_out_v3.shape}")
+    assert f_out_v3.shape == (1, 128, 80, 80)
+
+    f_out_v3_ar = fusion_v3([f1_ar, f2_ar, f3_ar])
+    print(f"FusionBlockv3 aspect-ratio output shape: {f_out_v3_ar.shape}")
+    assert f_out_v3_ar.shape == (1, 128, 80, 120)
