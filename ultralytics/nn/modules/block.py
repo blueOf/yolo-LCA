@@ -59,6 +59,7 @@ __all__ = (
     "FastLocalDETR",
     "ConvWithAttention",
     "FusionBlock",
+    "SpatialMeanCenter",
 )
 
 
@@ -388,6 +389,14 @@ class NonLocalBlockND(nn.Module):
         y = y.view(batch_size, self.inter_channels, *x.size()[2:])
         W_y = self.W(y)
         return W_y + x
+
+
+class SpatialMeanCenter(nn.Module):
+    """Center each channel map by subtracting its spatial mean."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply per-(B, C) mean subtraction over H and W."""
+        return x - x.mean(dim=(-2, -1), keepdim=True)
 
 
 class DFL(nn.Module):

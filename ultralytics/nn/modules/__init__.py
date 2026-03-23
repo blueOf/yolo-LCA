@@ -67,6 +67,7 @@ from .block import (
     ConvWithAttention,
     FastLocalDETRBlock,
     FusionBlock,
+    SpatialMeanCenter,
 )
 from .conv import (
     CBAM,
@@ -196,4 +197,5 @@ __all__ = (
     "YOLOESegment26",
     "v10Detect",
     "FusionBlock",
+    "SpatialMeanCenter",
 )
