@@ -394,7 +394,7 @@ class NonLocalBlockND(nn.Module):
 class SpatialMeanCenter(nn.Module):
     """Center each channel map by subtracting its spatial mean."""
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply per-(B, C) mean subtraction over H and W."""
         return x - x.mean(dim=(-2, -1), keepdim=True)
 
