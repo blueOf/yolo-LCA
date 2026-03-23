@@ -1,5 +1,5 @@
 from ultralytics import YOLO
-from ultralytics.nn.modules import Conv
+from ultralytics.nn.modules import Conv, FusionBlockv2, FusionBlockv3
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -479,3 +479,38 @@ if __name__ == "__main__":
 
     out = block(x)
     print(f"Output shape: {out.shape}")
+
+    fusion_v2 = FusionBlockv2(c1=64, c2=128, c3=256, c4=128, head_num=4)
+    f1 = torch.randn((1, 64, 80, 80))
+    f2 = torch.randn((1, 128, 40, 40))
+    f3 = torch.randn((1, 256, 20, 20))
+    f_out = fusion_v2([f1, f2, f3])
+    print(f"FusionBlockv2 output shape: {f_out.shape}")
+    assert f_out.shape == (1, 128, 80, 80)
+
+    fusion_v2_adjusted_heads = FusionBlockv2(c1=64, c2=128, c3=256, c4=128, head_num=3)
+    print(f"FusionBlockv2 adjusted head_num: {fusion_v2_adjusted_heads.head_num}")
+    assert fusion_v2_adjusted_heads.head_num == 1
+
+    f1_ar = torch.randn((1, 64, 80, 120))
+    f2_ar = torch.randn((1, 128, 40, 60))
+    f3_ar = torch.randn((1, 256, 20, 30))
+    f_out_ar = fusion_v2([f1_ar, f2_ar, f3_ar])
+    print(f"FusionBlockv2 aspect-ratio output shape: {f_out_ar.shape}")
+    assert f_out_ar.shape == (1, 128, 80, 120)
+
+    got_expected_assert = False
+    try:
+        _ = fusion_v2([torch.randn((1, 64, 82, 80)), f2, f3])
+    except AssertionError as e:
+        got_expected_assert = "x1 feature map size" in str(e)
+    assert got_expected_assert
+
+    fusion_v3 = FusionBlockv3(c1=64, c2=128, c3=256, c4=128, head_num=4)
+    f_out_v3 = fusion_v3([f1, f2, f3])
+    print(f"FusionBlockv3 output shape: {f_out_v3.shape}")
+    assert f_out_v3.shape == (1, 128, 80, 80)
+
+    f_out_v3_ar = fusion_v3([f1_ar, f2_ar, f3_ar])
+    print(f"FusionBlockv3 aspect-ratio output shape: {f_out_v3_ar.shape}")
+    assert f_out_v3_ar.shape == (1, 128, 80, 120)

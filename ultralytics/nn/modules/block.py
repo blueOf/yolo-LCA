@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import math
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,6 +14,8 @@ from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
+
+MIN_RECOMMENDED_HEAD_DIM = 8
 
 __all__ = (
     "C1",
@@ -59,6 +64,8 @@ __all__ = (
     "FastLocalDETR",
     "ConvWithAttention",
     "FusionBlock",
+    "FusionBlockv2",
+    "FusionBlockv3",
 )
 
 
@@ -3228,4 +3235,213 @@ class FusionBlock(nn.Module):
 
         # Residual connection + LayerNorm + output projection
         out = self._apply_ln(out + q_feat, self.norm_out)
+        return self.out_proj(out)
+
+
+class FusionBlockv2(nn.Module):
+    """Three-input block fusion module aligned by the smallest feature map grid."""
+
+    def __init__(self, c1, c2, c3, c4=None, head_num=4):
+        super().__init__()
+        if c2 <= 0:
+            raise ValueError(f"c2 must be positive, got {c2}.")
+        if head_num <= 0:
+            raise ValueError(f"head_num must be positive, got {head_num}.")
+        adjusted_head_num = math.gcd(c2, head_num)
+        if adjusted_head_num != head_num:
+            warnings.warn(
+                f"FusionBlockv2 adjusted head_num from {head_num} to {adjusted_head_num} to divide c2={c2}.",
+                stacklevel=2,
+            )
+        head_num = adjusted_head_num
+        self.p1_proj = Conv(c1, c2, 1, act=False)
+        self.p2_proj = Conv(c2, c2, 1, act=False)
+        self.p3_proj = Conv(c3, c2, 1, act=False)
+        self.out_proj = Conv(c2, c2 if c4 is None else c4, 1)
+        self.k1 = nn.Parameter(torch.tensor(1.0))
+        self.k2 = nn.Parameter(torch.tensor(1.0))
+        self.k3 = nn.Parameter(torch.tensor(1.0))
+        self.head_num = head_num
+        self.head_dim = c2 // head_num
+        if self.head_dim < MIN_RECOMMENDED_HEAD_DIM:
+            warnings.warn(
+                f"FusionBlockv2 head_dim is small ({self.head_dim}); consider using larger c2 or fewer heads.",
+                stacklevel=2,
+            )
+        self.scale = self.head_dim**-0.5
+
+    @staticmethod
+    def _to_blocks(x, base_h, base_w, name="input"):
+        """Convert (B, C, H, W) to (B, base_h, base_w, tokens_per_block, C)."""
+        b, c, h, w = x.shape
+        assert (
+            h % base_h == 0 and w % base_w == 0
+        ), (
+            f"{name} feature map size {(h, w)} must be divisible by base grid size "
+            f"{(base_h, base_w)}; got factors "
+            f"({h / base_h:.3f}, {w / base_w:.3f})."
+        )
+        fh, fw = h // base_h, w // base_w
+        return (
+            x.reshape(b, c, base_h, fh, base_w, fw)
+            .permute(0, 2, 4, 3, 5, 1)
+            .reshape(b, base_h, base_w, fh * fw, c)
+        )
+
+    @staticmethod
+    def _blocks_to_map(x, up_h, up_w):
+        """Convert (B, base_h, base_w, up_h*up_w, C) back to (B, C, H, W)."""
+        b, base_h, base_w, _, c = x.shape
+        return (
+            x.reshape(b, base_h, base_w, up_h, up_w, c)
+            .permute(0, 5, 1, 3, 2, 4)
+            .reshape(b, c, base_h * up_h, base_w * up_w)
+            .contiguous()
+        )
+
+    def _cross_attention(self, q, kv):
+        """Per-grid multi-head cross-attention from q tokens to kv tokens."""
+        b, gh, gw, nq, c = q.shape
+        nk = kv.shape[3]
+        h = self.head_num
+        d = self.head_dim
+        q_mh = q.reshape(b, gh, gw, nq, h, d).permute(0, 1, 2, 4, 3, 5)
+        kv_mh = kv.reshape(b, gh, gw, nk, h, d).permute(0, 1, 2, 4, 3, 5)
+        attn = torch.matmul(q_mh, kv_mh.transpose(-2, -1)) * self.scale
+        attn = torch.softmax(attn, dim=-1)
+        out = torch.matmul(attn, kv_mh)
+        return out.permute(0, 1, 2, 4, 3, 5).reshape(b, gh, gw, nq, c)
+
+    def forward(self, x):
+        """Fuse [high_res, mid_res, low_res] features and output high_res size map."""
+        x1, x2, x3 = x
+        p1 = self.p1_proj(x1)
+        p2 = self.p2_proj(x2)
+        p3 = self.p3_proj(x3)
+
+        base_h, base_w = p3.shape[2], p3.shape[3]
+        t1 = self._to_blocks(p1, base_h, base_w, name="x1")
+        t2 = self._to_blocks(p2, base_h, base_w, name="x2")
+        t3 = self._to_blocks(p3, base_h, base_w, name="x3")
+
+        out_tokens = (
+            self.k1 * t1 + self.k2 * self._cross_attention(t1, t2) + self.k3 * self._cross_attention(t1, t3)
+        )
+
+        up_h = p1.shape[2] // base_h
+        up_w = p1.shape[3] // base_w
+        out = self._blocks_to_map(out_tokens, up_h, up_w)
+        return self.out_proj(out)
+
+
+class FusionBlockv3(nn.Module):
+    """Three-input fusion with shared self-attended KV memory and branch-wise queries."""
+
+    def __init__(self, c1, c2, c3, c4=None, head_num=4):
+        super().__init__()
+        if c2 <= 0:
+            raise ValueError(f"c2 must be positive, got {c2}.")
+        if head_num <= 0:
+            raise ValueError(f"head_num must be positive, got {head_num}.")
+        adjusted_head_num = math.gcd(c2, head_num)
+        if adjusted_head_num != head_num:
+            warnings.warn(
+                f"FusionBlockv3 adjusted head_num from {head_num} to {adjusted_head_num} to divide c2={c2}.",
+                stacklevel=2,
+            )
+        head_num = adjusted_head_num
+        self.p1_proj = Conv(c1, c2, 1, act=False)
+        self.p2_proj = Conv(c2, c2, 1, act=False)
+        self.p3_proj = Conv(c3, c2, 1, act=False)
+        self.out_proj = Conv(c2, c2 if c4 is None else c4, 1)
+        self.k1 = nn.Parameter(torch.tensor(1.0))
+        self.k2 = nn.Parameter(torch.tensor(1.0))
+        self.k3 = nn.Parameter(torch.tensor(1.0))
+        self.head_num = head_num
+        self.head_dim = c2 // head_num
+        if self.head_dim < MIN_RECOMMENDED_HEAD_DIM:
+            warnings.warn(
+                f"FusionBlockv3 head_dim is small ({self.head_dim}); consider using larger c2 or fewer heads.",
+                stacklevel=2,
+            )
+        self.scale = self.head_dim**-0.5
+
+    @staticmethod
+    def _to_blocks(x, base_h, base_w, name="input"):
+        """Convert (B, C, H, W) to (B, base_h, base_w, tokens_per_block, C)."""
+        b, c, h, w = x.shape
+        assert (
+            h % base_h == 0 and w % base_w == 0
+        ), (
+            f"{name} feature map size {(h, w)} must be divisible by base grid size "
+            f"{(base_h, base_w)}; got factors "
+            f"({h / base_h:.3f}, {w / base_w:.3f})."
+        )
+        fh, fw = h // base_h, w // base_w
+        return (
+            x.reshape(b, c, base_h, fh, base_w, fw)
+            .permute(0, 2, 4, 3, 5, 1)
+            .reshape(b, base_h, base_w, fh * fw, c)
+        )
+
+    @staticmethod
+    def _blocks_to_map(x, up_h, up_w):
+        """Convert (B, base_h, base_w, up_h*up_w, C) back to (B, C, H, W)."""
+        b, base_h, base_w, _, c = x.shape
+        return (
+            x.reshape(b, base_h, base_w, up_h, up_w, c)
+            .permute(0, 5, 1, 3, 2, 4)
+            .reshape(b, c, base_h * up_h, base_w * up_w)
+            .contiguous()
+        )
+
+    def _cross_attention(self, q, kv):
+        """Per-grid multi-head cross-attention from q tokens to kv tokens."""
+        b, gh, gw, nq, c = q.shape
+        nk = kv.shape[3]
+        h = self.head_num
+        d = self.head_dim
+        q_mh = q.reshape(b, gh, gw, nq, h, d).permute(0, 1, 2, 4, 3, 5)
+        kv_mh = kv.reshape(b, gh, gw, nk, h, d).permute(0, 1, 2, 4, 3, 5)
+        attn = torch.matmul(q_mh, kv_mh.transpose(-2, -1)) * self.scale
+        attn = torch.softmax(attn, dim=-1)
+        out = torch.matmul(attn, kv_mh)
+        return out.permute(0, 1, 2, 4, 3, 5).reshape(b, gh, gw, nq, c)
+
+    def _self_attention(self, x):
+        """Per-grid multi-head self-attention for token memory construction."""
+        b, gh, gw, n, c = x.shape
+        h = self.head_num
+        d = self.head_dim
+        x_mh = x.reshape(b, gh, gw, n, h, d).permute(0, 1, 2, 4, 3, 5)
+        attn = torch.matmul(x_mh, x_mh.transpose(-2, -1)) * self.scale
+        attn = torch.softmax(attn, dim=-1)
+        out = torch.matmul(attn, x_mh)
+        return out.permute(0, 1, 2, 4, 3, 5).reshape(b, gh, gw, n, c)
+
+    def forward(self, x):
+        """Fuse [high_res, mid_res, low_res] features and output high_res size map."""
+        x1, x2, x3 = x
+        p1 = self.p1_proj(x1)
+        p2 = self.p2_proj(x2)
+        p3 = self.p3_proj(x3)
+
+        base_h, base_w = p3.shape[2], p3.shape[3]
+        t1 = self._to_blocks(p1, base_h, base_w, name="x1")
+        t2 = self._to_blocks(p2, base_h, base_w, name="x2")
+        t3 = self._to_blocks(p3, base_h, base_w, name="x3")
+
+        memory = self._self_attention(torch.cat((t1, t2, t3), dim=3))
+        o1 = self._cross_attention(t1, memory)
+        o2 = self._cross_attention(t2, memory)
+        o3 = self._cross_attention(t3, memory)
+
+        h1, w1 = p1.shape[2], p1.shape[3]
+        out1 = self._blocks_to_map(o1, h1 // base_h, w1 // base_w)
+        out2 = self._blocks_to_map(o2, p2.shape[2] // base_h, p2.shape[3] // base_w)
+        out3 = self._blocks_to_map(o3, 1, 1)
+
+        out = self.k1 * out1
+        out = out + self.k2 * F.interpolate(out2, size=(h1, w1), mode="nearest")
+        out = out + self.k3 * F.interpolate(out3, size=(h1, w1), mode="nearest")
         return self.out_proj(out)

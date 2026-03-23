@@ -80,6 +80,8 @@ from ultralytics.nn.modules import (
     ConvWithAttention,
     FastLocalDETRBlock,
     FusionBlock,
+    FusionBlockv2,
+    FusionBlockv3,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -2004,6 +2006,24 @@ def parse_model(d, ch, verbose=True):
                 c3 = make_divisible(min(c3, max_channels) * width, 8)
             c2 = c3
             args = [c1, c2_in, c3, *args[1:]]
+        elif m is FusionBlockv2:
+            c1 = ch[f[0]]
+            c2_in = ch[f[1]]
+            c3_in = ch[f[2]]
+            c4 = args[0]
+            if c4 != nc:
+                c4 = make_divisible(min(c4, max_channels) * width, 8)
+            c2 = c4
+            args = [c1, c2_in, c3_in, c4, *args[1:]]
+        elif m is FusionBlockv3:
+            c1 = ch[f[0]]
+            c2_in = ch[f[1]]
+            c3_in = ch[f[2]]
+            c4 = args[0]
+            if c4 != nc:
+                c4 = make_divisible(min(c4, max_channels) * width, 8)
+            c2 = c4
+            args = [c1, c2_in, c3_in, c4, *args[1:]]
         elif m in frozenset(
             {
                 Detect,

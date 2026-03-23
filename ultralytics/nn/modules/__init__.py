@@ -67,6 +67,8 @@ from .block import (
     ConvWithAttention,
     FastLocalDETRBlock,
     FusionBlock,
+    FusionBlockv2,
+    FusionBlockv3,
 )
 from .conv import (
     CBAM,
@@ -196,4 +198,6 @@ __all__ = (
     "YOLOESegment26",
     "v10Detect",
     "FusionBlock",
+    "FusionBlockv2",
+    "FusionBlockv3",
 )
