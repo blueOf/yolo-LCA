@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import torch
 import torch.nn.functional as F
+
+from ultralytics.utils import DEFAULT_CFG_DICT
 
 
 @dataclass
@@ -218,16 +222,45 @@ class NeckContrastiveTrainer:
             return [x.detach() if isinstance(x, torch.Tensor) else x for x in det_items]
         return det_items
 
+    def _ensure_loss_hypers(self) -> None:
+        """Ensure detection-loss hyperparameters exist when using checkpoint-loaded wrapper models."""
+        args = getattr(self.train_model, "args", None)
+        if args is None:
+            return
+        defaults = {k: DEFAULT_CFG_DICT[k] for k in ("box", "cls", "dfl")}
+        if isinstance(args, dict):
+            self.train_model.args = SimpleNamespace(**{**defaults, **args})
+            return
+        for key, value in defaults.items():
+            if not hasattr(args, key):
+                setattr(args, key, value)
+
+    def _ensure_trainable_params(self) -> None:
+        """Unfreeze parameters when loaded checkpoints have all grads disabled."""
+        params = list(self.train_model.parameters())
+        if params and not any(p.requires_grad for p in params):
+            for p in params:
+                p.requires_grad_(True)
+
     def training_step(
         self, batch: dict[str, torch.Tensor], optimizer: torch.optim.Optimizer
     ) -> dict[str, torch.Tensor]:
+        self.train_model.train()
+        self._ensure_trainable_params()
         optimizer.zero_grad(set_to_none=True)
         self.extractor.clear()
+        self._ensure_loss_hypers()
         det_loss, det_items = self.train_model(batch)
         if not isinstance(det_loss, torch.Tensor):
             raise TypeError("Model training forward must return det_loss as a torch.Tensor.")
+        if det_loss.ndim != 0:
+            warnings.warn("Model returned non-scalar det_loss; reducing with sum() to obtain a scalar.", stacklevel=2)
+            det_loss = det_loss.sum()
         if not det_loss.requires_grad:
-            raise RuntimeError("Model forward must return a differentiable training loss tensor (requires_grad=True).")
+            raise RuntimeError(
+                "Model forward must return a differentiable training loss tensor (requires_grad=True). "
+                "Check that model parameters are trainable and training mode is enabled."
+            )
         features = self.extractor.get_features()
         contrastive_loss = self.criterion(features, batch)
         total_loss = det_loss + self.config.contrastive_weight * contrastive_loss
