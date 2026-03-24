@@ -6,6 +6,8 @@ import torch.nn as nn
 
 from ultralytics.engine.predictor import BasePredictor
 
+TEST_IMG_SIZE = 32
+
 
 class _DummyDataset:
     def __init__(self):
@@ -18,7 +20,7 @@ class _DummyDataset:
         return 1
 
     def __iter__(self):
-        yield ["dummy.jpg"], [np.zeros((32, 32, 3), dtype=np.uint8)], [""]
+        yield ["dummy.jpg"], [np.zeros((TEST_IMG_SIZE, TEST_IMG_SIZE, 3), dtype=np.uint8)], [""]
 
 
 class _DummyBackend:
@@ -39,13 +41,13 @@ class _DummyBackend:
 
 class _DummyPredictor(BasePredictor):
     def setup_source(self, source, stride=None):
-        self.imgsz = (32, 32)
+        self.imgsz = (TEST_IMG_SIZE, TEST_IMG_SIZE)
         self.dataset = _DummyDataset()
         self.source_type = self.dataset.source_type
         self.vid_writer = {}
 
     def preprocess(self, im):
-        return torch.zeros((1, 3, 32, 32), dtype=torch.float32)
+        return torch.zeros((1, 3, TEST_IMG_SIZE, TEST_IMG_SIZE), dtype=torch.float32)
 
     def inference(self, im, *args, **kwargs):
         return torch.zeros((1, 84, 1))
