@@ -38,6 +38,10 @@ class NeckFeatureExtractor:
         modules = getattr(self.model, "model", None)
         if modules is None:
             raise AttributeError("model must provide a .model module list for layer hooks.")
+        if not hasattr(modules, "__len__") and hasattr(modules, "model"):
+            modules = modules.model
+        if not hasattr(modules, "__len__"):
+            raise TypeError("model.model must be an indexable module list (or expose nested .model).")
 
         max_idx = len(modules) - 1
         for layer in self.feature_layers:
@@ -188,13 +192,22 @@ class NeckContrastiveTrainer:
     def __init__(self, model: torch.nn.Module, config: NeckContrastiveConfig):
         self.model = model
         self.config = config
-        self.extractor = NeckFeatureExtractor(model, config.feature_layers)
+        self.train_model = self._resolve_train_model(model)
+        self.extractor = NeckFeatureExtractor(self.train_model, config.feature_layers)
         self.criterion = NeckContrastiveLoss(
             sample_per_box=config.sample_per_box,
             max_bg_samples_per_image=config.max_bg_samples_per_image,
             max_pos_samples_per_class=config.max_pos_samples_per_class,
             margin=config.margin,
         )
+
+    @staticmethod
+    def _resolve_train_model(model: torch.nn.Module) -> torch.nn.Module:
+        """Resolve trainable nn.Module for both raw models and Ultralytics YOLO wrappers."""
+        inner_model = getattr(model, "model", None)
+        if isinstance(inner_model, torch.nn.Module) and hasattr(inner_model, "model"):
+            return inner_model
+        return model
 
     @staticmethod
     def _normalize_det_items(det_items: Any) -> Any:
@@ -210,7 +223,7 @@ class NeckContrastiveTrainer:
     ) -> dict[str, torch.Tensor]:
         optimizer.zero_grad(set_to_none=True)
         self.extractor.clear()
-        det_loss, det_items = self.model(batch)
+        det_loss, det_items = self.train_model(batch)
         if not isinstance(det_loss, torch.Tensor):
             raise TypeError("Model training forward must return det_loss as a torch.Tensor.")
         if not det_loss.requires_grad:

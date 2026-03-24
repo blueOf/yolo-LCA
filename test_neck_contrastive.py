@@ -27,9 +27,17 @@ class DummyYOLOLikeModel(nn.Module):
         return det_loss, det_items
 
 
+class DummyYOLOWrapper:
+    def __init__(self):
+        self.model = DummyYOLOLikeModel()
+
+    def parameters(self):
+        return self.model.parameters()
+
+
 def main():
     torch.manual_seed(0)
-    model = DummyYOLOLikeModel()
+    model = DummyYOLOWrapper()
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     trainer = NeckContrastiveTrainer(
         model=model,
