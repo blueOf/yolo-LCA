@@ -24,6 +24,8 @@ class NeckContrastiveConfig:
     max_bg_samples_per_image: int = 256
     max_pos_samples_per_class: int = 256
     margin: float = 0.2
+    use_detection_loss: bool = False
+    freeze_head: bool = True
 
 
 class NeckFeatureExtractor:
@@ -204,6 +206,7 @@ class NeckContrastiveTrainer:
             max_pos_samples_per_class=config.max_pos_samples_per_class,
             margin=config.margin,
         )
+        self._apply_head_freeze()
 
     @staticmethod
     def _resolve_train_model(model: torch.nn.Module) -> torch.nn.Module:
@@ -241,6 +244,18 @@ class NeckContrastiveTrainer:
         if params and not any(p.requires_grad for p in params):
             for p in params:
                 p.requires_grad_(True)
+            self._apply_head_freeze()
+
+    def _apply_head_freeze(self) -> None:
+        """Freeze detection head parameters when requested."""
+        if not self.config.freeze_head:
+            return
+        modules = getattr(self.train_model, "model", None)
+        if modules is None or not hasattr(modules, "__len__") or len(modules) == 0:
+            return
+        head = modules[-1]
+        for p in head.parameters():
+            p.requires_grad_(False)
 
     def training_step(
         self, batch: dict[str, torch.Tensor], optimizer: torch.optim.Optimizer
@@ -249,20 +264,27 @@ class NeckContrastiveTrainer:
         self._ensure_trainable_params()
         optimizer.zero_grad(set_to_none=True)
         self.extractor.clear()
-        self._ensure_loss_hypers()
-        det_loss, det_items = self.train_model(batch)
-        if not isinstance(det_loss, torch.Tensor):
-            raise TypeError("Model training forward must return det_loss as a torch.Tensor.")
-        if det_loss.ndim != 0:
-            warnings.warn("Model returned non-scalar det_loss; reducing with sum() to obtain a scalar.", stacklevel=2)
-            det_loss = det_loss.sum()
-        if not det_loss.requires_grad:
-            raise RuntimeError(
-                "Model forward must return a differentiable training loss tensor (requires_grad=True). "
-                "Check that model parameters are trainable and training mode is enabled."
-            )
+        det_loss = None
+        det_items = None
+        if self.config.use_detection_loss:
+            self._ensure_loss_hypers()
+            det_loss, det_items = self.train_model(batch)
+            if not isinstance(det_loss, torch.Tensor):
+                raise TypeError("Model training forward must return det_loss as a torch.Tensor.")
+            if det_loss.ndim != 0:
+                warnings.warn("Model returned non-scalar det_loss; reducing with sum() to obtain a scalar.", stacklevel=2)
+                det_loss = det_loss.sum()
+            if not det_loss.requires_grad:
+                raise RuntimeError(
+                    "Model forward must return a differentiable training loss tensor (requires_grad=True). "
+                    "Check that model parameters are trainable and training mode is enabled."
+                )
+        else:
+            _ = self.train_model(batch["img"])
         features = self.extractor.get_features()
         contrastive_loss = self.criterion(features, batch)
+        if det_loss is None:
+            det_loss = contrastive_loss.detach().new_zeros(())
         total_loss = det_loss + self.config.contrastive_weight * contrastive_loss
         total_loss.backward()
         optimizer.step()
