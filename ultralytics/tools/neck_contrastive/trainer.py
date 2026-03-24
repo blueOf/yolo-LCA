@@ -272,7 +272,7 @@ class NeckContrastiveTrainer:
             if not isinstance(det_loss, torch.Tensor):
                 raise TypeError("Model training forward must return det_loss as a torch.Tensor.")
             if det_loss.ndim != 0:
-                warnings.warn("Model returned non-scalar det_loss; reducing with sum() to obtain a scalar.", stacklevel=1)
+                warnings.warn("Model returned non-scalar det_loss; reducing with sum() to obtain a scalar.", stacklevel=2)
                 det_loss = det_loss.sum()
             if not det_loss.requires_grad:
                 raise RuntimeError(
