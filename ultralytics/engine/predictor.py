@@ -200,6 +200,11 @@ class BasePredictor:
         )
         return [letterbox(image=x) for x in im]
 
+    @staticmethod
+    def _has_forward_hooks(model: torch.nn.Module) -> bool:
+        """Check whether any module contains forward hooks."""
+        return any(m._forward_hooks or m._forward_pre_hooks for m in model.modules())
+
     def postprocess(self, preds, img, orig_imgs):
         """Post-process predictions for an image and return them."""
         return preds
@@ -304,9 +309,14 @@ class BasePredictor:
 
             # Warmup model
             if not self.done_warmup:
-                self.model.warmup(
-                    imgsz=(1 if self.model.pt or self.model.triton else self.dataset.bs, self.model.ch, *self.imgsz)
-                )
+                backend_model = getattr(self.model, "model", None)
+                if isinstance(backend_model, torch.nn.Module) and self._has_forward_hooks(backend_model):
+                    if self.args.verbose:
+                        LOGGER.info("Skipping warmup because forward hooks are registered on the model.")
+                else:
+                    self.model.warmup(
+                        imgsz=(1 if self.model.pt or self.model.triton else self.dataset.bs, self.model.ch, *self.imgsz)
+                    )
                 self.done_warmup = True
 
             self.seen, self.windows, self.batch = 0, [], None
