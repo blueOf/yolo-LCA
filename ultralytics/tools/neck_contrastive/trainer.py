@@ -272,7 +272,7 @@ class NeckContrastiveTrainer:
             if not isinstance(det_loss, torch.Tensor):
                 raise TypeError("Model training forward must return det_loss as a torch.Tensor.")
             if det_loss.ndim != 0:
-                warnings.warn("Model returned non-scalar det_loss; reducing with sum() to obtain a scalar.", stacklevel=2)
+                warnings.warn("Model returned non-scalar det_loss; reducing with sum() to obtain a scalar.", stacklevel=1)
                 det_loss = det_loss.sum()
             if not det_loss.requires_grad:
                 raise RuntimeError(
@@ -284,7 +284,7 @@ class NeckContrastiveTrainer:
         features = self.extractor.get_features()
         contrastive_loss = self.criterion(features, batch)
         if det_loss is None:
-            det_loss = contrastive_loss.detach().new_zeros(())
+            det_loss = contrastive_loss.new_zeros(())
         total_loss = det_loss + self.config.contrastive_weight * contrastive_loss
         total_loss.backward()
         optimizer.step()
