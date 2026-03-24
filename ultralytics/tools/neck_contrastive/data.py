@@ -27,6 +27,19 @@ class NeckContrastiveYOLOData:
         fraction: float = 1.0,
         autodownload: bool = True,
     ):
+        """Initialize data helper from YOLO dataset YAML.
+
+        Args:
+            data (str): Path to YOLO detection dataset YAML.
+            imgsz (int): Input image size.
+            batch (int): Batch size for dataset/dataloader build.
+            workers (int): DataLoader workers.
+            cache (bool | str): Cache labels/images setting from Ultralytics config (e.g. False, True, "ram", "disk").
+            single_cls (bool): Treat all classes as a single class.
+            classes (list[int] | None): Optional class filter.
+            fraction (float): Fraction of dataset to use.
+            autodownload (bool): Whether to allow dataset autodownload/check logic.
+        """
         self.batch = batch
         self.workers = workers
         self.data = check_det_dataset(data, autodownload=autodownload)
