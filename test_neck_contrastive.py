@@ -39,10 +39,12 @@ def main():
     batch = {
         "img": torch.randn(2, 3, 64, 64),
         "batch_idx": torch.tensor([0, 1], dtype=torch.long),
-        "cls": torch.tensor([0, 0], dtype=torch.long),
+        "cls": torch.tensor([0, 1], dtype=torch.long),
         "bboxes": torch.tensor([[0.5, 0.5, 0.3, 0.3], [0.5, 0.5, 0.25, 0.25]], dtype=torch.float32),
     }
+    before = [p.detach().clone() for p in model.parameters() if p.requires_grad]
     metrics = trainer.training_step(batch, optimizer)
+    after = [p.detach() for p in model.parameters() if p.requires_grad]
     trainer.close()
 
     assert metrics["total_loss"].ndim == 0
@@ -50,6 +52,7 @@ def main():
     assert metrics["contrastive_loss"].ndim == 0
     assert torch.isfinite(metrics["total_loss"])
     assert torch.isfinite(metrics["contrastive_loss"])
+    assert any(not torch.allclose(b, a) for b, a in zip(before, after))
     print("neck_contrastive test passed")
 
 

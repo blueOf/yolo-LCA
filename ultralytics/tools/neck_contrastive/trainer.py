@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 
@@ -76,15 +78,18 @@ class NeckContrastiveLoss(torch.nn.Module):
         max_bg_samples_per_image: int = 256,
         max_pos_samples_per_class: int = 256,
         margin: float = 0.2,
+        eps: float = 1e-8,
     ):
         super().__init__()
         self.sample_per_box = sample_per_box
         self.max_bg_samples_per_image = max_bg_samples_per_image
         self.max_pos_samples_per_class = max_pos_samples_per_class
         self.margin = margin
+        self.eps = eps
 
     @staticmethod
     def _xywh_to_xyxy(bboxes: torch.Tensor) -> torch.Tensor:
+        """Convert normalized boxes from (cx, cy, w, h) to (x1, y1, x2, y2)."""
         xy = bboxes[..., :2]
         wh = bboxes[..., 2:]
         half = wh * 0.5
@@ -92,18 +97,23 @@ class NeckContrastiveLoss(torch.nn.Module):
 
     @staticmethod
     def _sample_rows(vectors: torch.Tensor, max_samples: int) -> torch.Tensor:
+        """Randomly subsample rows to at most max_samples for memory/compute control."""
         if vectors.shape[0] <= max_samples:
             return vectors
         idx = torch.randperm(vectors.shape[0], device=vectors.device)[:max_samples]
         return vectors[idx]
 
     def _sample_box_vectors(self, feat_i: torch.Tensor, x1: int, y1: int, x2: int, y2: int) -> torch.Tensor:
+        """Extract (N,C) vectors from a box region on one feature map and sample them."""
+        if x2 < x1 or y2 < y1:
+            return feat_i.new_zeros((0, feat_i.shape[0]))
         region = feat_i[:, y1 : y2 + 1, x1 : x2 + 1].reshape(feat_i.shape[0], -1).transpose(0, 1)
         if region.shape[0] == 0:
             return region
         return self._sample_rows(region, self.sample_per_box)
 
     def _loss_single_level(self, feat: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Compute one-level contrastive loss with class pull-together and background push-away terms."""
         bs, _, h, w = feat.shape
         device = feat.device
         cls = batch["cls"].view(-1).long().to(device)
@@ -141,12 +151,12 @@ class NeckContrastiveLoss(torch.nn.Module):
         pull_terms, push_terms = [], []
         bg_pool = torch.cat(bg_vectors, dim=0) if bg_vectors else None
         if bg_pool is not None:
-            bg_pool = F.normalize(bg_pool, dim=1, eps=1e-8)
+            bg_pool = F.normalize(bg_pool, dim=1, eps=self.eps)
 
         for vectors_list in class_vectors.values():
             vectors = torch.cat(vectors_list, dim=0)
             vectors = self._sample_rows(vectors, self.max_pos_samples_per_class)
-            vectors = F.normalize(vectors, dim=1, eps=1e-8)
+            vectors = F.normalize(vectors, dim=1, eps=self.eps)
             if vectors.shape[0] >= 2:
                 sim = vectors @ vectors.transpose(0, 1)
                 mask = torch.triu(torch.ones_like(sim, dtype=torch.bool), diagonal=1)
@@ -186,12 +196,25 @@ class NeckContrastiveTrainer:
             margin=config.margin,
         )
 
+    @staticmethod
+    def _normalize_det_items(det_items: Any) -> Any:
+        """Detach tensor-like loss items for logging while preserving non-tensor structures."""
+        if isinstance(det_items, torch.Tensor):
+            return det_items.detach()
+        if isinstance(det_items, (tuple, list)):
+            return [x.detach() if isinstance(x, torch.Tensor) else x for x in det_items]
+        return det_items
+
     def training_step(
         self, batch: dict[str, torch.Tensor], optimizer: torch.optim.Optimizer
     ) -> dict[str, torch.Tensor]:
         optimizer.zero_grad(set_to_none=True)
         self.extractor.clear()
         det_loss, det_items = self.model(batch)
+        if not isinstance(det_loss, torch.Tensor):
+            raise TypeError("Model training forward must return det_loss as a torch.Tensor.")
+        if not det_loss.requires_grad:
+            raise RuntimeError("Model forward must return a differentiable training loss tensor (requires_grad=True).")
         features = self.extractor.get_features()
         contrastive_loss = self.criterion(features, batch)
         total_loss = det_loss + self.config.contrastive_weight * contrastive_loss
@@ -201,7 +224,7 @@ class NeckContrastiveTrainer:
             "total_loss": total_loss.detach(),
             "det_loss": det_loss.detach(),
             "contrastive_loss": contrastive_loss.detach(),
-            "det_items": det_items.detach() if hasattr(det_items, "detach") else det_items,
+            "det_items": self._normalize_det_items(det_items),
         }
 
     def close(self) -> None:
