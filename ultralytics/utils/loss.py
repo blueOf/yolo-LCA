@@ -468,6 +468,205 @@ class v8DetectionLoss:
         return loss * batch_size, loss_detach
 
 
+class v8ContrastiveDetectionLoss(v8DetectionLoss):
+    """Criterion class for computing training losses for YOLOv8 with contrastive learning on intermediate features.
+
+    This class extends v8DetectionLoss to add contrastive loss computation for specified intermediate layers.
+    The contrastive loss encourages:
+    1. Features from the same object (foreground) to be similar
+    2. Features from different objects to be dissimilar
+    3. Background features to be separated from all foreground features
+    """
+
+    def __init__(self, model, tal_topk: int = 10, tal_topk2: int | None = None, contrast_weight: float = 0.1):
+        """Initialize v8ContrastiveDetectionLoss with contrastive learning parameters.
+
+        Args:
+            model: The detection model (must be de-paralleled).
+            tal_topk (int): Top-k for task-aligned assignment.
+            tal_topk2 (int | None): Secondary top-k parameter.
+            contrast_weight (float): Weight for contrastive loss component.
+        """
+        super().__init__(model, tal_topk, tal_topk2)
+        self.contrast_weight = contrast_weight
+        self.contrast_temp = 0.07  # Temperature for contrastive loss
+
+    def compute_contrastive_loss(
+        self,
+        contrast_feats: list[torch.Tensor],
+        fg_mask: torch.Tensor,
+        target_gt_idx: torch.Tensor,
+        anchor_points: torch.Tensor,
+        stride_tensor: torch.Tensor,
+        gt_bboxes: torch.Tensor,
+        batch_idx_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute contrastive loss for intermediate features.
+
+        This method:
+        1. Maps ground truth boxes to feature map coordinates for each scale
+        2. Extracts feature vectors for each ground truth object (foreground)
+        3. Extracts background feature vectors
+        4. Computes contrastive loss to:
+           - Pull features from the same object together
+           - Push features from different objects apart
+           - Push background features away from all foreground features
+
+        Args:
+            contrast_feats (list[torch.Tensor]): List of feature maps for contrastive learning.
+            fg_mask (torch.Tensor): Foreground mask indicating positive anchors (BS, N_anchors).
+            target_gt_idx (torch.Tensor): Ground truth indices for each anchor (BS, N_anchors).
+            anchor_points (torch.Tensor): Anchor point coordinates (N_anchors, 2).
+            stride_tensor (torch.Tensor): Stride values for anchors (N_anchors, 1).
+            gt_bboxes (torch.Tensor): Ground truth boxes in xyxy format (BS, N_gt, 4).
+            batch_idx_tensor (torch.Tensor): Batch indices for ground truth boxes.
+
+        Returns:
+            (torch.Tensor): Contrastive loss value.
+        """
+        if not contrast_feats:
+            return torch.tensor(0.0, device=self.device)
+
+        total_contrast_loss = 0.0
+        batch_size = fg_mask.shape[0]
+
+        # Process each feature map scale
+        for feat_map in contrast_feats:
+            bs, c, h, w = feat_map.shape
+            feat_map = feat_map.view(bs, c, -1).permute(0, 2, 1)  # (bs, h*w, c)
+
+            # Normalize features
+            feat_map = F.normalize(feat_map, dim=-1)
+
+            # For each image in batch
+            for b in range(batch_size):
+                feat_b = feat_map[b]  # (h*w, c)
+                fg_mask_b = fg_mask[b]  # (N_anchors,)
+                target_gt_idx_b = target_gt_idx[b]  # (N_anchors,)
+
+                if not fg_mask_b.any():
+                    continue
+
+                # Get unique GT indices for this image
+                gt_indices_b = target_gt_idx_b[fg_mask_b].unique()
+
+                # Compute feature map coordinates for this scale
+                stride_val = self.stride[0].item()  # Assume uniform stride per scale
+                feat_h, feat_w = h, w
+
+                # For each ground truth object, collect its foreground features
+                gt_features = []
+                for gt_idx in gt_indices_b:
+                    # Get all anchor indices assigned to this GT
+                    anchor_mask = (target_gt_idx_b == gt_idx) & fg_mask_b
+
+                    if anchor_mask.sum() > 0:
+                        # Map anchor indices to feature map coordinates
+                        anchor_pts = anchor_points[anchor_mask]  # (N_assigned, 2)
+                        feat_x = (anchor_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
+                        feat_y = (anchor_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
+                        feat_indices = feat_y * feat_w + feat_x
+
+                        # Extract features for this GT object
+                        gt_feat = feat_b[feat_indices]  # (N_assigned, c)
+                        gt_features.append(gt_feat.mean(dim=0, keepdim=True))  # (1, c)
+
+                if len(gt_features) < 2:
+                    continue  # Need at least 2 objects for contrastive loss
+
+                # Stack all GT features
+                gt_features = torch.cat(gt_features, dim=0)  # (N_gt, c)
+
+                # Extract background features (not assigned to any GT)
+                bg_mask = ~fg_mask_b
+                if bg_mask.any():
+                    # Sample some background positions
+                    bg_indices = torch.where(bg_mask)[0]
+                    num_bg = min(len(bg_indices), len(gt_features) * 2)
+                    if num_bg > 0:
+                        bg_sample_idx = bg_indices[torch.randperm(len(bg_indices), device=self.device)[:num_bg]]
+                        bg_pts = anchor_points[bg_sample_idx]
+                        bg_x = (bg_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
+                        bg_y = (bg_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
+                        bg_feat_indices = bg_y * feat_w + bg_x
+                        bg_features = feat_b[bg_feat_indices]  # (N_bg, c)
+
+                        # Compute contrastive loss
+                        # Positive pairs: features from same object should be similar
+                        # Negative pairs: features from different objects and background should be dissimilar
+
+                        # InfoNCE-style loss for GT objects
+                        num_gt = gt_features.shape[0]
+                        for i in range(num_gt):
+                            anchor = gt_features[i:i+1]  # (1, c)
+
+                            # Positive: same object (self)
+                            pos_sim = torch.matmul(anchor, anchor.t()) / self.contrast_temp
+
+                            # Negatives: other objects + background
+                            neg_feats = torch.cat([
+                                gt_features[torch.arange(num_gt) != i],
+                                bg_features
+                            ], dim=0)
+
+                            if neg_feats.shape[0] > 0:
+                                neg_sim = torch.matmul(anchor, neg_feats.t()) / self.contrast_temp  # (1, N_neg)
+
+                                # InfoNCE loss: -log(exp(pos) / (exp(pos) + sum(exp(neg))))
+                                logits = torch.cat([pos_sim, neg_sim], dim=1)  # (1, 1+N_neg)
+                                labels = torch.zeros(1, dtype=torch.long, device=self.device)
+                                loss = F.cross_entropy(logits, labels)
+                                total_contrast_loss += loss
+
+        return total_contrast_loss / max(batch_size, 1)
+
+    def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate detection loss with contrastive learning component.
+
+        Args:
+            preds (dict): Predictions including 'boxes', 'scores', 'feats', and optionally 'contrast_feats'.
+            batch (dict): Batch data including ground truth annotations.
+
+        Returns:
+            (tuple): (loss_tensor, detached_loss_tensor) where loss_tensor has shape (4,) for
+                     [box_loss, cls_loss, dfl_loss, contrast_loss]
+        """
+        batch_size = preds["boxes"].shape[0]
+
+        # Get standard detection loss
+        (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor), det_loss, loss_detach = (
+            self.get_assigned_targets_and_loss(preds, batch)
+        )
+
+        # Initialize loss with 4 components: box, cls, dfl, contrast
+        loss = torch.zeros(4, device=self.device)
+        loss[:3] = det_loss  # box, cls, dfl
+
+        # Compute contrastive loss if contrast features are provided
+        if "contrast_feats" in preds and preds["contrast_feats"]:
+            # Get batch indices for GT boxes
+            batch_idx_tensor = batch["batch_idx"].view(-1, 1)
+
+            contrast_loss = self.compute_contrastive_loss(
+                preds["contrast_feats"],
+                fg_mask,
+                target_gt_idx,
+                anchor_points,
+                stride_tensor,
+                batch["bboxes"].to(self.device),
+                batch_idx_tensor,
+            )
+
+            loss[3] = contrast_loss * self.contrast_weight
+
+        # Prepare detached loss for logging
+        loss_detach_full = torch.zeros(4, device=self.device)
+        loss_detach_full[:3] = loss_detach
+        loss_detach_full[3] = loss[3].detach()
+
+        return loss * batch_size, loss_detach_full
+
+
 class v8SegmentationLoss(v8DetectionLoss):
     """Criterion class for computing training losses for YOLOv8 segmentation."""
 
