@@ -167,7 +167,17 @@ class DetectionTrainer(BaseTrainer):
 
     def get_validator(self):
         """Return a DetectionValidator for YOLO model validation."""
-        self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        # Check if using contrastive loss (4 components) or standard loss (3 components)
+        from ultralytics.utils.loss import v8ContrastiveDetectionLoss
+
+        # Initialize criterion if it doesn't exist yet
+        if not hasattr(self, "criterion"):
+            self.criterion = self.model.init_criterion()
+
+        if isinstance(self.criterion, v8ContrastiveDetectionLoss):
+            self.loss_names = "box_loss", "cls_loss", "dfl_loss", "contrast_loss"
+        else:
+            self.loss_names = "box_loss", "cls_loss", "dfl_loss"
         return yolo.detect.DetectionValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
         )
