@@ -38,6 +38,7 @@ def main():
         sample_per_box=64,
         max_bg_samples_per_image=16,
         max_pos_samples_per_class=64,
+        # negative margins force active push terms so weighted decomposition can be asserted deterministically
         margin=-1.0,
         inter_class_margin=-1.0,
         pull_weight=0.0,

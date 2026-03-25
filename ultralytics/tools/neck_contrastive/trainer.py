@@ -175,12 +175,12 @@ class NeckContrastiveLoss(torch.nn.Module):
         if bg_pool is not None:
             bg_pool = F.normalize(bg_pool, dim=1, eps=self.eps)
 
-        normalized_class_vectors: list[torch.Tensor] = []
+        class_prototypes: list[torch.Tensor] = []
         for vectors_list in class_vectors.values():
             vectors = torch.cat(vectors_list, dim=0)
             vectors = self._sample_rows(vectors, self.max_pos_samples_per_class)
             vectors = F.normalize(vectors, dim=1, eps=self.eps)
-            normalized_class_vectors.append(vectors)
+            class_prototypes.append(F.normalize(vectors.mean(dim=0, keepdim=True), dim=1, eps=self.eps))
             if vectors.shape[0] >= 2:
                 sim = vectors @ vectors.transpose(0, 1)
                 mask = torch.triu(torch.ones_like(sim, dtype=torch.bool), diagonal=1)
@@ -189,16 +189,11 @@ class NeckContrastiveLoss(torch.nn.Module):
                 neg_sim = vectors @ bg_pool.transpose(0, 1)
                 bg_push_terms.append(F.relu(neg_sim - self.margin).mean())
 
-        for i in range(len(normalized_class_vectors)):
-            vi = normalized_class_vectors[i]
-            if vi.shape[0] == 0:
-                continue
-            for j in range(i + 1, len(normalized_class_vectors)):
-                vj = normalized_class_vectors[j]
-                if vj.shape[0] == 0:
-                    continue
-                inter_sim = vi @ vj.transpose(0, 1)
-                inter_class_push_terms.append(F.relu(inter_sim - self.inter_class_margin).mean())
+        if len(class_prototypes) >= 2:
+            class_proto = torch.cat(class_prototypes, dim=0)  # (num_classes, C)
+            class_sim = class_proto @ class_proto.transpose(0, 1)
+            mask = torch.triu(torch.ones_like(class_sim, dtype=torch.bool), diagonal=1)
+            inter_class_push_terms.append(F.relu(class_sim[mask] - self.inter_class_margin).mean())
 
         if not pull_terms and not bg_push_terms and not inter_class_push_terms:
             return feat.sum() * 0.0
