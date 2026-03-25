@@ -32,18 +32,11 @@ backbone:
 
 # YOLO11n head with FusionBlock
 head:
-  # Top-down (upsample) path: FusionBlock replaces nn.Upsample + Concat + C3k2
-  # kv=10 (20x20, P5 deep features), q=6 (40x40, P4 backbone skip) -> 40x40
-  - [[10, 6], 1, FusionBlock, [512]] # 11
+  - [[4,6,-1], 1, FusionBlock, [None]] 
 
-  # kv=11 (40x40, fused P5+P4), q=4 (80x80, P3 backbone skip) -> 80x80
-  - [[11, 4], 1, FusionBlock, [256]] # 12 (P3/8-small)
+  - [11, 1, Index, [128,0]]  # 提取第 9 层的第 0 个输出 (c1)，索引为 10
+  - [11, 1, Index, [128,1]]  # 提取第 9 层的第 1 个输出 (c2)，索引为 11
+  - [11, 1, Index, [256,2]]  # 提取第 9 层的第 2 个输出 (c3)，索引为 12
 
-  # Bottom-up (downsample) path: FusionBlock replaces Conv stride-2 + Concat + C3k2
-  # kv=12 (80x80, fused P3), q=11 (40x40, fused P4) -> 40x40
-  - [[12, 11], 1, FusionBlock, [512]] # 13 (P4/16-medium)
 
-  # kv=13 (40x40, fused P4), q=10 (20x20, P5 deep features) -> 20x20
-  - [[13, 10], 1, FusionBlock, [1024]] # 14 (P5/32-large)
-
-  - [[12, 13, 14], 1, Detect, [nc]] # Detect(P3, P4, P5)
+  - [[12,13,14], 1, Detect, [nc]] # Detect(P3, P4, P5)

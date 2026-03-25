@@ -13,7 +13,15 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 from PIL import __version__ as pil_version
 
-from ultralytics.utils import IS_COLAB, IS_KAGGLE, LOGGER, TryExcept, ops, plt_settings, threaded
+from ultralytics.utils import (
+    IS_COLAB,
+    IS_KAGGLE,
+    LOGGER,
+    TryExcept,
+    ops,
+    plt_settings,
+    threaded,
+)
 from ultralytics.utils.checks import check_font, check_version, is_ascii
 from ultralytics.utils.files import increment_path
 
@@ -196,10 +204,14 @@ class Annotator:
         example: str = "abc",
     ):
         """Initialize the Annotator class with image and line width along with color palette for keypoints and limbs."""
-        non_ascii = not is_ascii(example)  # non-latin labels, i.e. asian, arabic, cyrillic
+        non_ascii = not is_ascii(
+            example
+        )  # non-latin labels, i.e. asian, arabic, cyrillic
         input_is_pil = isinstance(im, Image.Image)
         self.pil = pil or non_ascii or input_is_pil
-        self.lw = line_width or max(round(sum(im.size if input_is_pil else im.shape) / 2 * 0.003), 2)
+        self.lw = line_width or max(
+            round(sum(im.size if input_is_pil else im.shape) / 2 * 0.003), 2
+        )
         if not input_is_pil:
             if im.shape[2] == 1:  # handle grayscale
                 im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGR)
@@ -208,7 +220,9 @@ class Annotator:
             elif im.shape[2] > 3:  # multispectral
                 im = np.ascontiguousarray(im[..., :3])
         if self.pil:  # use PIL
-            self.im = im if input_is_pil else Image.fromarray(im)  # stay in BGR since color palette is in BGR
+            self.im = (
+                im if input_is_pil else Image.fromarray(im)
+            )  # stay in BGR since color palette is in BGR
             if self.im.mode not in {"RGB", "RGBA"}:  # multispectral
                 self.im = self.im.convert("RGB")
             self.draw = ImageDraw.Draw(self.im, "RGBA")
@@ -220,9 +234,13 @@ class Annotator:
                 self.font = ImageFont.load_default()
             # Deprecation fix for w, h = getsize(string) -> _, _, w, h = getbox(string)
             if check_version(pil_version, "9.2.0"):
-                self.font.getsize = lambda x: self.font.getbbox(x)[2:4]  # text width, height
+                self.font.getsize = lambda x: self.font.getbbox(x)[
+                    2:4
+                ]  # text width, height
         else:  # use cv2
-            assert im.data.contiguous, "Image not contiguous. Apply np.ascontiguousarray(im) to Annotator input images."
+            assert (
+                im.data.contiguous
+            ), "Image not contiguous. Apply np.ascontiguousarray(im) to Annotator input images."
             self.im = im if im.flags.writeable else im.copy()
             self.tf = max(self.lw - 1, 1)  # font thickness
             self.sf = self.lw / 3  # font scale
@@ -249,8 +267,12 @@ class Annotator:
             [5, 7],
         ]
 
-        self.limb_color = colors.pose_palette[[9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16]]
-        self.kpt_color = colors.pose_palette[[16, 16, 16, 16, 16, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9]]
+        self.limb_color = colors.pose_palette[
+            [9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16]
+        ]
+        self.kpt_color = colors.pose_palette[
+            [16, 16, 16, 16, 16, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9]
+        ]
         self.dark_colors = {
             (235, 219, 11),
             (243, 243, 243),
@@ -276,7 +298,9 @@ class Annotator:
             (104, 31, 17),
         }
 
-    def get_txt_color(self, color: tuple = (128, 128, 128), txt_color: tuple = (255, 255, 255)) -> tuple:
+    def get_txt_color(
+        self, color: tuple = (128, 128, 128), txt_color: tuple = (255, 255, 255)
+    ) -> tuple:
         """Assign text color based on background color.
 
         Args:
@@ -299,7 +323,13 @@ class Annotator:
         else:
             return txt_color
 
-    def box_label(self, box, label: str = "", color: tuple = (128, 128, 128), txt_color: tuple = (255, 255, 255)):
+    def box_label(
+        self,
+        box,
+        label: str = "",
+        color: tuple = (128, 128, 128),
+        txt_color: tuple = (255, 255, 255),
+    ):
         """Draw a bounding box on an image with a given label.
 
         Args:
@@ -321,31 +351,58 @@ class Annotator:
         multi_points = isinstance(box[0], list)  # multiple points with shape (n, 2)
         p1 = [int(b) for b in box[0]] if multi_points else (int(box[0]), int(box[1]))
         if self.pil:
-            self.draw.polygon(
-                [tuple(b) for b in box], width=self.lw, outline=color
-            ) if multi_points else self.draw.rectangle(box, width=self.lw, outline=color)
+            (
+                self.draw.polygon([tuple(b) for b in box], width=self.lw, outline=color)
+                if multi_points
+                else self.draw.rectangle(box, width=self.lw, outline=color)
+            )
             if label:
                 w, h = self.font.getsize(label)  # text width, height
                 outside = p1[1] >= h  # label fits outside box
-                if p1[0] > self.im.size[0] - w:  # size is (w, h), check if label extend beyond right side of image
+                if (
+                    p1[0] > self.im.size[0] - w
+                ):  # size is (w, h), check if label extend beyond right side of image
                     p1 = self.im.size[0] - w, p1[1]
                 self.draw.rectangle(
-                    (p1[0], p1[1] - h if outside else p1[1], p1[0] + w + 1, p1[1] + 1 if outside else p1[1] + h + 1),
+                    (
+                        p1[0],
+                        p1[1] - h if outside else p1[1],
+                        p1[0] + w + 1,
+                        p1[1] + 1 if outside else p1[1] + h + 1,
+                    ),
                     fill=color,
                 )
                 # self.draw.text([box[0], box[1]], label, fill=txt_color, font=self.font, anchor='ls')  # for PIL>8.0
-                self.draw.text((p1[0], p1[1] - h if outside else p1[1]), label, fill=txt_color, font=self.font)
+                self.draw.text(
+                    (p1[0], p1[1] - h if outside else p1[1]),
+                    label,
+                    fill=txt_color,
+                    font=self.font,
+                )
         else:  # cv2
-            cv2.polylines(
-                self.im, [np.asarray(box, dtype=int)], True, color, self.lw
-            ) if multi_points else cv2.rectangle(
-                self.im, p1, (int(box[2]), int(box[3])), color, thickness=self.lw, lineType=cv2.LINE_AA
+            (
+                cv2.polylines(
+                    self.im, [np.asarray(box, dtype=int)], True, color, self.lw
+                )
+                if multi_points
+                else cv2.rectangle(
+                    self.im,
+                    p1,
+                    (int(box[2]), int(box[3])),
+                    color,
+                    thickness=self.lw,
+                    lineType=cv2.LINE_AA,
+                )
             )
             if label:
-                w, h = cv2.getTextSize(label, 0, fontScale=self.sf, thickness=self.tf)[0]  # text width, height
+                w, h = cv2.getTextSize(label, 0, fontScale=self.sf, thickness=self.tf)[
+                    0
+                ]  # text width, height
                 h += 3  # add pixels to pad text
                 outside = p1[1] >= h  # label fits outside box
-                if p1[0] > self.im.shape[1] - w:  # shape is (h, w), check if label extend beyond right side of image
+                if (
+                    p1[0] > self.im.shape[1] - w
+                ):  # shape is (h, w), check if label extend beyond right side of image
                     p1 = self.im.shape[1] - w, p1[1]
                 p2 = p1[0] + w, p1[1] - h if outside else p1[1] + h
                 cv2.rectangle(self.im, p1, p2, color, -1, cv2.LINE_AA)  # filled
@@ -360,7 +417,14 @@ class Annotator:
                     lineType=cv2.LINE_AA,
                 )
 
-    def masks(self, masks, colors, im_gpu: torch.Tensor = None, alpha: float = 0.5, retina_masks: bool = False):
+    def masks(
+        self,
+        masks,
+        colors,
+        im_gpu: torch.Tensor = None,
+        alpha: float = 0.5,
+        retina_masks: bool = False,
+    ):
         """Plot masks on image.
 
         Args:
@@ -374,13 +438,17 @@ class Annotator:
             # Convert to numpy first
             self.im = np.asarray(self.im).copy()
         if im_gpu is None:
-            assert isinstance(masks, np.ndarray), "`masks` must be a np.ndarray if `im_gpu` is not provided."
+            assert isinstance(
+                masks, np.ndarray
+            ), "`masks` must be a np.ndarray if `im_gpu` is not provided."
             overlay = self.im.copy()
             for i, mask in enumerate(masks):
                 overlay[mask.astype(bool)] = colors[i]
             self.im = cv2.addWeighted(self.im, 1 - alpha, overlay, alpha, 0)
         else:
-            assert isinstance(masks, torch.Tensor), "'masks' must be a torch.Tensor if 'im_gpu' is provided."
+            assert isinstance(
+                masks, torch.Tensor
+            ), "'masks' must be a torch.Tensor if 'im_gpu' is provided."
             if len(masks) == 0:
                 self.im[:] = im_gpu.permute(1, 2, 0).contiguous().cpu().numpy() * 255
                 return
@@ -393,10 +461,18 @@ class Annotator:
                 masks = ops.scale_masks(masks[None].float(), (ih, iw))[0] > 0.5
                 # Convert original BGR image to RGB tensor
                 im_gpu = (
-                    torch.from_numpy(self.im).to(masks.device).permute(2, 0, 1).flip(0).contiguous().float() / 255.0
+                    torch.from_numpy(self.im)
+                    .to(masks.device)
+                    .permute(2, 0, 1)
+                    .flip(0)
+                    .contiguous()
+                    .float()
+                    / 255.0
                 )
 
-            colors = torch.tensor(colors, device=masks.device, dtype=torch.float32) / 255.0  # shape(n,3)
+            colors = (
+                torch.tensor(colors, device=masks.device, dtype=torch.float32) / 255.0
+            )  # shape(n,3)
             colors = colors[:, None, None]  # shape(n,1,1,3)
             masks = masks.unsqueeze(3)  # shape(n,h,w,1)
             masks_color = masks * (colors * alpha)  # shape(n,h,w,3)
@@ -442,14 +518,23 @@ class Annotator:
         is_pose = nkpt == 17 and ndim in {2, 3}
         kpt_line &= is_pose  # `kpt_line=True` for now only supports human pose plotting
         for i, k in enumerate(kpts):
-            color_k = kpt_color or (self.kpt_color[i].tolist() if is_pose else colors(i))
+            color_k = kpt_color or (
+                self.kpt_color[i].tolist() if is_pose else colors(i)
+            )
             x_coord, y_coord = k[0], k[1]
             if x_coord % shape[1] != 0 and y_coord % shape[0] != 0:
                 if len(k) == 3:
                     conf = k[2]
                     if conf < conf_thres:
                         continue
-                cv2.circle(self.im, (int(x_coord), int(y_coord)), radius, color_k, -1, lineType=cv2.LINE_AA)
+                cv2.circle(
+                    self.im,
+                    (int(x_coord), int(y_coord)),
+                    radius,
+                    color_k,
+                    -1,
+                    lineType=cv2.LINE_AA,
+                )
 
         if kpt_line:
             ndim = kpts.shape[-1]
@@ -461,9 +546,19 @@ class Annotator:
                     conf2 = kpts[(sk[1] - 1), 2]
                     if conf1 < conf_thres or conf2 < conf_thres:
                         continue
-                if pos1[0] % shape[1] == 0 or pos1[1] % shape[0] == 0 or pos1[0] < 0 or pos1[1] < 0:
+                if (
+                    pos1[0] % shape[1] == 0
+                    or pos1[1] % shape[0] == 0
+                    or pos1[0] < 0
+                    or pos1[1] < 0
+                ):
                     continue
-                if pos2[0] % shape[1] == 0 or pos2[1] % shape[0] == 0 or pos2[0] < 0 or pos2[1] < 0:
+                if (
+                    pos2[0] % shape[1] == 0
+                    or pos2[1] % shape[0] == 0
+                    or pos2[0] < 0
+                    or pos2[1] < 0
+                ):
                     continue
                 cv2.line(
                     self.im,
@@ -481,7 +576,14 @@ class Annotator:
         """Add rectangle to image (PIL-only)."""
         self.draw.rectangle(xy, fill, outline, width)
 
-    def text(self, xy, text: str, txt_color: tuple = (255, 255, 255), anchor: str = "top", box_color: tuple = ()):
+    def text(
+        self,
+        xy,
+        text: str,
+        txt_color: tuple = (255, 255, 255),
+        anchor: str = "top",
+        box_color: tuple = (),
+    ):
         """Add text to an image using PIL or cv2.
 
         Args:
@@ -499,7 +601,9 @@ class Annotator:
                 if box_color:
                     # Draw rectangle for each line
                     w, h = self.font.getsize(line)
-                    self.draw.rectangle((xy[0], xy[1], xy[0] + w + 1, xy[1] + h + 1), fill=box_color)
+                    self.draw.rectangle(
+                        (xy[0], xy[1], xy[0] + w + 1, xy[1] + h + 1), fill=box_color
+                    )
                 self.draw.text(xy, line, fill=txt_color, font=self.font)
                 xy[1] += h
         else:
@@ -509,7 +613,16 @@ class Annotator:
                 outside = xy[1] >= h  # label fits outside box
                 p2 = xy[0] + w, xy[1] - h if outside else xy[1] + h
                 cv2.rectangle(self.im, xy, p2, box_color, -1, cv2.LINE_AA)  # filled
-            cv2.putText(self.im, text, xy, 0, self.sf, txt_color, thickness=self.tf, lineType=cv2.LINE_AA)
+            cv2.putText(
+                self.im,
+                text,
+                xy,
+                0,
+                self.sf,
+                txt_color,
+                thickness=self.tf,
+                lineType=cv2.LINE_AA,
+            )
 
     def fromarray(self, im):
         """Update `self.im` from a NumPy array or PIL image."""
@@ -523,10 +636,16 @@ class Annotator:
 
     def show(self, title: str | None = None):
         """Show the annotated image."""
-        im = Image.fromarray(np.asarray(self.im)[..., ::-1])  # Convert BGR NumPy array to RGB PIL Image
-        if IS_COLAB or IS_KAGGLE:  # cannot use IS_JUPYTER as it runs for all IPython environments
+        im = Image.fromarray(
+            np.asarray(self.im)[..., ::-1]
+        )  # Convert BGR NumPy array to RGB PIL Image
+        if (
+            IS_COLAB or IS_KAGGLE
+        ):  # cannot use IS_JUPYTER as it runs for all IPython environments
             try:
-                display(im)  # noqa - display() function only available in ipython environments
+                display(
+                    im
+                )  # noqa - display() function only available in ipython environments
             except ImportError as e:
                 LOGGER.warning(f"Unable to display image in Jupyter notebooks: {e}")
         else:
@@ -583,7 +702,9 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     x = polars.DataFrame(boxes, schema=["x", "y", "width", "height"])
 
     # Matplotlib labels
-    subplot_3_4_color = LinearSegmentedColormap.from_list("white_blue", ["white", "blue"])
+    subplot_3_4_color = LinearSegmentedColormap.from_list(
+        "white_blue", ["white", "blue"]
+    )
     ax = plt.subplots(2, 2, figsize=(8, 8), tight_layout=True)[1].ravel()
     y = ax[0].hist(cls, bins=np.linspace(0, nc, nc + 1) - 0.5, rwidth=0.8)
     for i in range(nc):
@@ -598,7 +719,9 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     boxes = np.column_stack([0.5 - boxes[:, 2:4] / 2, 0.5 + boxes[:, 2:4] / 2]) * 1000
     img = Image.fromarray(np.ones((1000, 1000, 3), dtype=np.uint8) * 255)
     for class_id, box in zip(cls[:500], boxes[:500]):
-        ImageDraw.Draw(img).rectangle(box.tolist(), width=1, outline=colors(class_id))  # plot
+        ImageDraw.Draw(img).rectangle(
+            box.tolist(), width=1, outline=colors(class_id)
+        )  # plot
     ax[1].imshow(img)
     ax[1].axis("off")
 
@@ -663,7 +786,11 @@ def save_one_box(
     xyxy = ops.xywh2xyxy(b).long()
     xyxy = ops.clip_boxes(xyxy, im.shape)
     grayscale = im.shape[2] == 1  # grayscale image
-    crop = im[int(xyxy[0, 1]) : int(xyxy[0, 3]), int(xyxy[0, 0]) : int(xyxy[0, 2]), :: (1 if BGR or grayscale else -1)]
+    crop = im[
+        int(xyxy[0, 1]) : int(xyxy[0, 3]),
+        int(xyxy[0, 0]) : int(xyxy[0, 2]),
+        :: (1 if BGR or grayscale else -1),
+    ]
     if save:
         file.parent.mkdir(parents=True, exist_ok=True)  # make directory
         f = str(increment_path(file).with_suffix(".jpg"))
@@ -763,17 +890,25 @@ def plot_images(
     # Annotate
     fs = int((h + w) * ns * 0.01)  # font size
     fs = max(fs, 18)  # ensure that the font size is large enough to be easily readable.
-    annotator = Annotator(mosaic, line_width=round(fs / 10), font_size=fs, pil=True, example=str(names))
+    annotator = Annotator(
+        mosaic, line_width=round(fs / 10), font_size=fs, pil=True, example=str(names)
+    )
     for i in range(bs):
         x, y = int(w * (i // ns)), int(h * (i % ns))  # block origin
-        annotator.rectangle([x, y, x + w, y + h], None, (255, 255, 255), width=2)  # borders
+        annotator.rectangle(
+            [x, y, x + w, y + h], None, (255, 255, 255), width=2
+        )  # borders
         if paths:
-            annotator.text([x + 5, y + 5], text=Path(paths[i]).name[:40], txt_color=(220, 220, 220))  # filenames
+            annotator.text(
+                [x + 5, y + 5], text=Path(paths[i]).name[:40], txt_color=(220, 220, 220)
+            )  # filenames
         if len(cls) > 0:
             idx = batch_idx == i
             classes = cls[idx].astype("int")
             labels = confs is None
-            conf = confs[idx] if confs is not None else None  # check for confidence presence (label vs pred)
+            conf = (
+                confs[idx] if confs is not None else None
+            )  # check for confidence presence (label vs pred)
 
             if len(bboxes):
                 boxes = bboxes[idx]
@@ -800,13 +935,17 @@ def plot_images(
                     color = colors(c)
                     c = names.get(c, c) if names else c
                     label = f"{c}" if labels else f"{c} {conf[0]:.1f}"
-                    annotator.text([x, y], label, txt_color=color, box_color=(64, 64, 64, 128))
+                    annotator.text(
+                        [x, y], label, txt_color=color, box_color=(64, 64, 64, 128)
+                    )
 
             # Plot keypoints
             if len(kpts):
                 kpts_ = kpts[idx].copy()
                 if len(kpts_):
-                    if kpts_[..., 0].max() <= 1.01 or kpts_[..., 1].max() <= 1.01:  # if normalized with tolerance .01
+                    if (
+                        kpts_[..., 0].max() <= 1.01 or kpts_[..., 1].max() <= 1.01
+                    ):  # if normalized with tolerance .01
                         kpts_[..., 0] *= w  # scale to pixels
                         kpts_[..., 1] *= h
                     elif scale < 1:  # absolute coords need scale if image scales
@@ -819,7 +958,9 @@ def plot_images(
 
             # Plot masks
             if len(masks):
-                if idx.shape[0] == masks.shape[0] and masks.max() <= 1:  # overlap_mask=False
+                if (
+                    idx.shape[0] == masks.shape[0] and masks.max() <= 1
+                ):  # overlap_mask=False
                     image_masks = masks[idx]
                 else:  # overlap_mask=True
                     image_masks = masks[[i]]  # (1, 640, 640)
@@ -840,7 +981,8 @@ def plot_images(
                             mask = image_masks[j].astype(bool)
                         try:
                             im[y : y + h, x : x + w, :][mask] = (
-                                im[y : y + h, x : x + w, :][mask] * 0.4 + np.array(color) * 0.6
+                                im[y : y + h, x : x + w, :][mask] * 0.4
+                                + np.array(color) * 0.6
                             )
                         except Exception:
                             pass
@@ -853,7 +995,9 @@ def plot_images(
 
 
 @plt_settings()
-def plot_results(file: str = "path/to/results.csv", dir: str = "", on_plot: Callable | None = None):
+def plot_results(
+    file: str = "path/to/results.csv", dir: str = "", on_plot: Callable | None = None
+):
     """Plot training results from a results CSV file. The function supports various types of data including
     segmentation, pose estimation, and classification. Plots are saved as 'results.png' in the directory where the
     CSV is located.
@@ -873,7 +1017,9 @@ def plot_results(file: str = "path/to/results.csv", dir: str = "", on_plot: Call
 
     save_dir = Path(file).parent if file else Path(dir)
     files = list(save_dir.glob("results*.csv"))
-    assert len(files), f"No results.csv files found in {save_dir.resolve()}, nothing to plot."
+    assert len(
+        files
+    ), f"No results.csv files found in {save_dir.resolve()}, nothing to plot."
 
     loss_keys, metric_keys = [], []
     for i, f in enumerate(files):
@@ -887,15 +1033,27 @@ def plot_results(file: str = "path/to/results.csv", dir: str = "", on_plot: Call
                         metric_keys.append(c)
                 loss_mid, metric_mid = len(loss_keys) // 2, len(metric_keys) // 2
                 columns = (
-                    loss_keys[:loss_mid] + metric_keys[:metric_mid] + loss_keys[loss_mid:] + metric_keys[metric_mid:]
+                    loss_keys[:loss_mid]
+                    + metric_keys[:metric_mid]
+                    + loss_keys[loss_mid:]
+                    + metric_keys[metric_mid:]
                 )
-                fig, ax = plt.subplots(2, len(columns) // 2, figsize=(len(columns) + 2, 6), tight_layout=True)
+                fig, ax = plt.subplots(
+                    2,
+                    len(columns) // 2,
+                    figsize=(len(columns) + 2, 6),
+                    tight_layout=True,
+                )
                 ax = ax.ravel()
             x = data.select(data.columns[0]).to_numpy().flatten()
             for i, j in enumerate(columns):
                 y = data.select(j).to_numpy().flatten().astype("float")
-                ax[i].plot(x, y, marker=".", label=f.stem, linewidth=2, markersize=8)  # actual results
-                ax[i].plot(x, gaussian_filter1d(y, sigma=3), ":", label="smooth", linewidth=2)  # smoothing line
+                ax[i].plot(
+                    x, y, marker=".", label=f.stem, linewidth=2, markersize=8
+                )  # actual results
+                ax[i].plot(
+                    x, gaussian_filter1d(y, sigma=3), ":", label="smooth", linewidth=2
+                )  # smoothing line
                 ax[i].set_title(j, fontsize=12)
         except Exception as e:
             LOGGER.error(f"Plotting error for {f}: {e}")
@@ -907,7 +1065,14 @@ def plot_results(file: str = "path/to/results.csv", dir: str = "", on_plot: Call
         on_plot(fname)
 
 
-def plt_color_scatter(v, f, bins: int = 20, cmap: str = "viridis", alpha: float = 0.8, edgecolors: str = "none"):
+def plt_color_scatter(
+    v,
+    f,
+    bins: int = 20,
+    cmap: str = "viridis",
+    alpha: float = 0.8,
+    edgecolors: str = "none",
+):
     """Plot a scatter plot with points colored based on a 2D histogram.
 
     Args:
@@ -940,7 +1105,9 @@ def plt_color_scatter(v, f, bins: int = 20, cmap: str = "viridis", alpha: float 
 
 
 @plt_settings()
-def plot_tune_results(csv_file: str = "tune_results.csv", exclude_zero_fitness_points: bool = True):
+def plot_tune_results(
+    csv_file: str = "tune_results.csv", exclude_zero_fitness_points: bool = True
+):
     """Plot the evolution results stored in a 'tune_results.csv' file. The function generates a scatter plot for each
     key in the CSV, color-coded based on fitness scores. The best-performing configurations are highlighted on
     the plots.
@@ -973,7 +1140,9 @@ def plot_tune_results(csv_file: str = "tune_results.csv", exclude_zero_fitness_p
         mask = fitness > 0  # exclude zero-fitness points
         x, fitness = x[mask], fitness[mask]
     if len(fitness) == 0:
-        LOGGER.warning("No valid fitness values to plot (all iterations may have failed)")
+        LOGGER.warning(
+            "No valid fitness values to plot (all iterations may have failed)"
+        )
         return
     # Iterative sigma rejection on lower bound only
     for _ in range(3):  # max 3 iterations
@@ -1002,7 +1171,9 @@ def plot_tune_results(csv_file: str = "tune_results.csv", exclude_zero_fitness_p
     x = range(1, len(fitness) + 1)
     plt.figure(figsize=(10, 6), tight_layout=True)
     plt.plot(x, fitness, marker="o", linestyle="none", label="fitness")
-    plt.plot(x, gaussian_filter1d(fitness, sigma=3), ":", label="smoothed", linewidth=2)  # smoothing line
+    plt.plot(
+        x, gaussian_filter1d(fitness, sigma=3), ":", label="smoothed", linewidth=2
+    )  # smoothing line
     plt.title("Fitness vs Iteration")
     plt.xlabel("Iteration")
     plt.ylabel("Fitness")
@@ -1012,7 +1183,13 @@ def plot_tune_results(csv_file: str = "tune_results.csv", exclude_zero_fitness_p
 
 
 @plt_settings()
-def feature_visualization(x, module_type: str, stage: int, n: int = 32, save_dir: Path = Path("runs/detect/exp")):
+def feature_visualization(
+    x,
+    module_type: str,
+    stage: int,
+    n: int = 32,
+    save_dir: Path = Path("runs/detect/exp"),
+):
     """Visualize feature maps of a given model module during inference.
 
     Args:
@@ -1024,17 +1201,30 @@ def feature_visualization(x, module_type: str, stage: int, n: int = 32, save_dir
     """
     import matplotlib.pyplot as plt  # scope for faster 'import ultralytics'
 
-    for m in {"Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"}:  # all model heads
+    for m in {
+        "Detect",
+        "Segment",
+        "Pose",
+        "Classify",
+        "OBB",
+        "RTDETRDecoder",
+    }:  # all model heads
         if m in module_type:
             return
     if isinstance(x, torch.Tensor):
         _, channels, height, width = x.shape  # batch, channels, height, width
         if height > 1 and width > 1:
-            f = save_dir / f"stage{stage}_{module_type.rsplit('.', 1)[-1]}_features.png"  # filename
+            f = (
+                save_dir / f"stage{stage}_{module_type.rsplit('.', 1)[-1]}_features.png"
+            )  # filename
 
-            blocks = torch.chunk(x[0].cpu(), channels, dim=0)  # select batch index 0, block by channels
+            blocks = torch.chunk(
+                x[0].cpu(), channels, dim=0
+            )  # select batch index 0, block by channels
             n = min(n, channels)  # number of plots
-            _, ax = plt.subplots(math.ceil(n / 8), 8, tight_layout=True)  # 8 rows x n/8 cols
+            _, ax = plt.subplots(
+                math.ceil(n / 8), 8, tight_layout=True
+            )  # 8 rows x n/8 cols
             ax = ax.ravel()
             plt.subplots_adjust(wspace=0.05, hspace=0.05)
             for i in range(n):

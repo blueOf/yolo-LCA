@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
+from ultralytics.nn.modules.transformer import LayerNorm2d
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
@@ -59,6 +60,7 @@ __all__ = (
     "FastLocalDETR",
     "ConvWithAttention",
     "FusionBlock",
+    "SpatialMeanCenter",
 )
 
 
@@ -2675,7 +2677,6 @@ class FastLocalDETR(nn.Module):
         self.proj = nn.Linear(c, cout) if c != cout else nn.Identity()
 
         # 核心点：用 1x1 卷积代替 Linear，并放在最前面
-        # 这样 unfold 的就是投影后的结果，减少后续计算
         self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
 
         self.layers = nn.ModuleList(
@@ -2763,25 +2764,26 @@ class FastLocalDETRBlock(nn.Module):
             N,
         )
         self.kernel_size = 2 * sight + 1
-        self.input_norm = nn.LayerNorm(c)
-        self.proj = nn.Linear(c, cout) if c != cout else nn.Identity()
+        self.input_norm = LayerNorm2d(c)
+        self.proj = nn.Conv(c, cout, 1) if c != cout else nn.Identity()
 
         # 核心点：用 1x1 卷积代替 Linear，并放在最前面
-        # 这样 unfold 的就是投影后的结果，减少后续计算
         self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
 
         self.layers = nn.ModuleList(
             [
                 nn.ModuleDict(
                     {
-                        "qkv_conv": nn.Conv2d(c, 3 * c, 1),  # 一次性完成邻居的 QKV
-                        "norm_sa": nn.LayerNorm(c),
-                        "q_center": nn.Linear(c, c),
-                        "norm_ca": nn.LayerNorm(c),
-                        "ffn": nn.Sequential(
-                            nn.Linear(c, c * 4), nn.GELU(), nn.Linear(c * 4, c)
+                        "qkv_conv": Conv(c, 3 * c, 1),  # 一次性完成邻居的 QKV
+                        "norm_sa": nn.LayerNorm(
+                            c // head_num,
                         ),
-                        "norm_ffn": nn.LayerNorm(c),
+                        "q_center": nn.Linear(c, c),
+                        "norm_ca": LayerNorm2d(
+                            c,
+                        ),
+                        "ffn": nn.Sequential(Conv(c, c * 4, 1), Conv(c * 4, c, 1)),
+                        "norm_ffn": LayerNorm2d(c),
                     }
                 )
                 for _ in range(N)
@@ -2792,56 +2794,44 @@ class FastLocalDETRBlock(nn.Module):
         B, C, H, W = x.shape
         ks, Np = self.kernel_size, self.kernel_size**2
 
-        # 1. Norm 依然需要
-        x = (
-            self.input_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
-        )  # (B, C, H, W)
-
-        center_x = x.flatten(2).transpose(1, 2)  # (B, L, C)
+        center_x = self.input_norm(x)
 
         for layer in self.layers:
-            # 核心优化：单次 Unfold，直接处理 QKV
-            qkv = layer["qkv_conv"](x)  # (B, 3C, H, W)
-            # 一次映射 + 一次滑动窗口 = 最小显存开销
-            qkv_nb = self.unfold(qkv).view(B, 3, C, Np, H * W)
-            q_nb = qkv_nb[:, 0].permute(0, 3, 1, 2).reshape(-1, Np, C)  # (B*L, Np, C)
-            k_nb = qkv_nb[:, 1].permute(0, 3, 1, 2).reshape(-1, Np, C)
-            v_nb = qkv_nb[:, 2].permute(0, 3, 1, 2).reshape(-1, Np, C)
+            qkv = layer["qkv_conv"](center_x)  # (B, 3C, H, W)
+            qkv_nb = (
+                self.unfold(qkv)
+                .view(B, 3, self.head_num, C // self.head_num, Np, H * W)
+                .permute(0, 1, 5, 2, 4, 3)
+                .contiguous()
+            )  # (B, 3, L,head_num, NP, C // self.head_num)
+            q_nb = qkv_nb[:, 0]
+            k_nb = qkv_nb[:, 1]
+            v_nb = qkv_nb[:, 2]
 
-            # --- SA ---
-            q_nb = q_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )  # (B*L, Np,head_num，C//head_num) -> (B*L, head_num, Np, C//head_num)
-            k_nb = k_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
             attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
 
             attn = F.softmax(attn, dim=-1)
 
-            v_nb = v_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            nb_encoded = (attn @ v_nb).transpose(1, 2).reshape(-1, Np, C)
-            nb_encoded = layer["norm_sa"](nb_encoded)  # 这里简化了残差以测试速度
+            nb_encoded = attn @ v_nb
+            nb_encoded = layer["norm_sa"](nb_encoded + q_nb)
 
             # --- CA ---
-            qc = (
-                layer["q_center"](center_x)
-                .view(-1, 1, self.head_num, C // self.head_num)
-                .transpose(1, 2)
-            )
-            kc = nb_encoded.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )
-            vc = kc  # 简化演示
+            qc = layer["q_center"](
+                center_x.reshape(B, C, H * W).transpose(1, 2)
+            ).reshape(B, H * W, self.head_num, 1, C // self.head_num)
+            kc = nb_encoded
+            vc = kc
 
-            attn_c = F.softmax((qc @ kc.transpose(-2, -1)) * (C**-0.5), dim=-1)
-            ca_out = (attn_c @ vc).transpose(1, 2).reshape(B, H * W, C)
+            attn_c = F.softmax(
+                (qc @ kc.transpose(-2, -1)) * ((C // self.head_num) ** -0.5), dim=-1
+            )
+            ca_out = attn_c @ vc
+            ca_out = ca_out.permute(0, 2, 3, 4, 1).reshape(B, C, H, W)
 
             center_x = layer["norm_ca"](center_x + ca_out)
             center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
 
-            if self.N > 1:
-                x = center_x.transpose(1, 2).view(B, C, H, W).contiguous()
-
-        return self.proj(center_x).transpose(1, 2).view(B, self.cout, H, W)
+        return self.proj(center_x)
 
 
 class ConvWithAttention(nn.Module):
@@ -2910,113 +2900,6 @@ class ConvWithAttention(nn.Module):
         out = torch.matmul(attn, v_flat.unsqueeze(-1)).squeeze(-1)  # (B, C, L)
 
         return out.view(B, C, H, W)
-
-
-class FastLocalDETR_PE(nn.Module):
-
-    def __init__(self, c, cout, sight=2, head_num=4, N=1):
-        super().__init__()
-        self.c, self.cout, self.sight, self.head_num, self.N = (
-            c,
-            cout,
-            sight,
-            head_num,
-            N,
-        )
-        self.kernel_size = 2 * sight + 1
-        self.input_norm = nn.LayerNorm(c)
-        self.proj = nn.Linear(c, cout) if c != cout else nn.Identity()
-
-        # 核心点：用 1x1 卷积代替 Linear，并放在最前面
-        # 这样 unfold 的就是投影后的结果，减少后续计算
-        self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
-
-        self.layers = nn.ModuleList(
-            [
-                nn.ModuleDict(
-                    {
-                        "qkv_conv": nn.Conv2d(c, 3 * c, 1),  # 一次性完成邻居的 QKV
-                        "norm_sa": nn.LayerNorm(c),
-                        "q_center": nn.Linear(c, c),
-                        "norm_ca": nn.LayerNorm(c),
-                        "ffn": nn.Sequential(
-                            nn.Linear(c, c * 4), nn.GELU(), nn.Linear(c * 4, c)
-                        ),
-                        "norm_ffn": nn.LayerNorm(c),
-                    }
-                )
-                for _ in range(N)
-            ]
-        )
-        self.row_pos_embed = nn.Parameter(torch.randn(self.kernel_size**2, 1) * 0.02)
-        self.col_pos_embed = nn.Parameter(torch.randn(1, c) * 0.02)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        ks, Np = self.kernel_size, self.kernel_size**2
-
-        # 1. Norm 依然需要
-        x = (
-            self.input_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
-        )  # (B, C, H, W)
-
-        pos_embed = self.row_pos_embed + self.col_pos_embed  # (Np, C)
-        center_x = x.flatten(2).transpose(1, 2)  # (B, L, C)
-        center_x = center_x + pos_embed[(Np - 1) // 2, :]  # 添加中心位置编码
-
-        for i, layer in enumerate(self.layers):
-            # 核心优化：单次 Unfold，直接处理 QKV
-            qkv = layer["qkv_conv"](x)  # (B, 3C, H, W)
-            # 一次映射 + 一次滑动窗口 = 最小显存开销
-            qkv_nb = (
-                self.unfold(qkv)
-                .view(B, 3, C, Np, H * W)
-                .permute(0, 1, 4, 3, 2)
-                .contiguous()
-            )  # (B, 3, L, NP, C)
-
-            # 只在第一层循环时添加位置编码
-            if i == 0:
-                qkv_nb = qkv_nb + pos_embed
-
-            q_nb = qkv_nb[:, 0].reshape(-1, Np, C)  # (B*L, Np, C)
-            k_nb = qkv_nb[:, 1].reshape(-1, Np, C)
-            v_nb = qkv_nb[:, 2].reshape(-1, Np, C)
-
-            # --- SA ---
-            q_nb = q_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )  # (B*L, Np,head_num，C//head_num) -> (B*L, head_num, Np, C//head_num)
-            k_nb = k_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
-
-            attn = F.softmax(attn, dim=-1)
-
-            v_nb = v_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            nb_encoded = (attn @ v_nb).transpose(1, 2).reshape(-1, Np, C)
-            nb_encoded = layer["norm_sa"](nb_encoded)  # 这里简化了残差以测试速度
-
-            # --- CA ---
-            qc = (
-                layer["q_center"](center_x)
-                .view(-1, 1, self.head_num, C // self.head_num)
-                .transpose(1, 2)
-            )
-            kc = nb_encoded.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )
-            vc = kc  # 简化演示
-
-            attn_c = F.softmax((qc @ kc.transpose(-2, -1)) * (C**-0.5), dim=-1)
-            ca_out = (attn_c @ vc).transpose(1, 2).reshape(B, H * W, C)
-
-            center_x = layer["norm_ca"](center_x + ca_out)
-            center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
-
-            if self.N > 1:
-                x = center_x.transpose(1, 2).view(B, C, H, W).contiguous()
-
-        return self.proj(center_x).transpose(1, 2).view(B, self.cout, H, W)
 
 
 class ConvWithAttention(nn.Module):
@@ -3101,131 +2984,125 @@ class ConvWithAttention(nn.Module):
         return res
 
 
+import math
+
+
 class FusionBlock(nn.Module):
-    """Cross-attention fusion block for multi-scale feature fusion.
+    """Three-input fusion with shared self-attended KV memory and branch-wise queries."""
 
-    Replaces Upsample/Downsample + Concat + C3k2 patterns in YOLO head.
-    Takes two feature maps at different spatial resolutions and fuses them using
-    cross-attention (downsample direction) or element-wise gated attention (upsample direction).
-
-    Input is a list [x_kv, x_q] where:
-        x_kv: feature map providing key/value (may be higher or lower spatial resolution).
-        x_q: feature map providing query (output spatial resolution matches this).
-
-    For downsample (x_kv higher-res than x_q): folds x_kv into factor x factor spatial
-    tokens per output position, then performs cross-attention with x_q as query.
-    For upsample (x_kv lower-res than x_q): expands x_kv to match x_q spatial size
-    via nearest interpolation, then performs element-wise gated attention.
-
-    Attributes:
-        kv_proj (Conv): 1x1 convolution projecting kv input to working channel dimension.
-        q_proj (Conv): 1x1 convolution projecting q input to working channel dimension.
-        norm_q (nn.LayerNorm): Layer normalization for query features.
-        norm_kv (nn.LayerNorm): Layer normalization for key/value features.
-        norm_out (nn.LayerNorm): Layer normalization for output features.
-        out_proj (Conv): 1x1 convolution projecting to output channels.
-    """
-
-    def __init__(self, c1, c2, c3, head_num=4):
-        """Initialize FusionBlock.
-
-        Args:
-            c1 (int): Channels of kv input (first input).
-            c2 (int): Channels of q input (second input), also the internal working dimension.
-            c3 (int): Output channels.
-            head_num (int): Number of attention heads.
-        """
+    def __init__(self, c1, c2, c3, c4=None, head_num=4):
         super().__init__()
-        # Ensure head_num evenly divides c2
-        while c2 % head_num != 0:
-            head_num -= 1
-        self.kv_proj = Conv(c1, c2, 1)
-        self.q_proj = Conv(c2, c2, 1)
-        self.norm_q = nn.LayerNorm(c2)
-        self.norm_kv = nn.LayerNorm(c2)
-        self.norm_out = nn.LayerNorm(c2)
-        self.out_proj = Conv(c2, c3, 1)
+        if c2 <= 0:
+            raise ValueError(f"c2 must be positive, got {c2}.")
+        if head_num <= 0:
+            raise ValueError(f"head_num must be positive, got {head_num}.")
+        adjusted_head_num = math.gcd(c2, head_num)
+        head_num = adjusted_head_num
+        self.p1_proj = Conv(c1, c2, 1, act=False)
+        self.p2_proj = Conv(c2, c2, 1, act=False)
+        self.p3_proj = Conv(c3, c2, 1, act=False)
+        self.out1_proj = Conv(c2, c4[0], 1)
+        self.out2_proj = Conv(c2, c4[1], 1)
+        self.out3_proj = Conv(c2, c4[2], 1)
+        self.k1 = nn.Parameter(torch.tensor(1.0))
+        self.k2 = nn.Parameter(torch.tensor(1.0))
+        self.k3 = nn.Parameter(torch.tensor(1.0))
         self.head_num = head_num
         self.head_dim = c2 // head_num
         self.scale = self.head_dim**-0.5
-        self._c2 = c2
 
-    def _apply_ln(self, x, norm):
-        """Apply LayerNorm on the channel dimension of a (B, C, H, W) tensor."""
-        return norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
+    @staticmethod
+    def _to_blocks(x, base_h, base_w, name="input"):
+        """Convert (B, C, H, W) to (B, base_h, base_w, tokens_per_block, C)."""
+        b, c, h, w = x.shape
+        assert h % base_h == 0 and w % base_w == 0, (
+            f"{name} feature map size {(h, w)} must be divisible by base grid size "
+            f"{(base_h, base_w)}; got factors "
+            f"({h / base_h:.3f}, {w / base_w:.3f})."
+        )
+        fh, fw = h // base_h, w // base_w
+        return (
+            x.reshape(b, c, base_h, fh, base_w, fw)
+            .permute(0, 2, 4, 3, 5, 1)
+            .reshape(b, base_h, base_w, fh * fw, c)
+        )
+
+    @staticmethod
+    def _blocks_to_map(x, up_h, up_w):
+        """Convert (B, base_h, base_w, up_h*up_w, C) back to (B, C, H, W)."""
+        b, base_h, base_w, _, c = x.shape
+        return (
+            x.reshape(b, base_h, base_w, up_h, up_w, c)
+            .permute(0, 5, 1, 3, 2, 4)
+            .reshape(b, c, base_h * up_h, base_w * up_w)
+            .contiguous()
+        )
+
+    def _cross_attention(self, q, kv):
+        """Per-grid multi-head cross-attention from q tokens to kv tokens."""
+        b, gh, gw, nq, c = q.shape
+        nk = kv.shape[3]
+        h = self.head_num
+        d = self.head_dim
+        q_mh = q.reshape(b, gh, gw, nq, h, d).permute(0, 1, 2, 4, 3, 5)
+        kv_mh = kv.reshape(b, gh, gw, nk, h, d).permute(0, 1, 2, 4, 3, 5)
+        attn = torch.matmul(q_mh, kv_mh.transpose(-2, -1)) * self.scale
+        attn = torch.softmax(attn, dim=-1)
+        out = torch.matmul(attn, kv_mh)
+        return out.permute(0, 1, 2, 4, 3, 5).reshape(b, gh, gw, nq, c)
+
+    def _self_attention(self, x):
+        """Per-grid multi-head self-attention for token memory construction."""
+        b, gh, gw, n, c = x.shape
+        h = self.head_num
+        d = self.head_dim
+        x_mh = x.reshape(b, gh, gw, n, h, d).permute(0, 1, 2, 4, 3, 5)
+        attn = torch.matmul(x_mh, x_mh.transpose(-2, -1)) * self.scale
+        attn = torch.softmax(attn, dim=-1)
+        out = torch.matmul(attn, x_mh)
+        return out.permute(0, 1, 2, 4, 3, 5).reshape(b, gh, gw, n, c)
 
     def forward(self, x):
-        """Forward pass fusing two multi-scale feature maps.
+        """Fuse [high_res, mid_res, low_res] features and output high_res size map."""
+        x1, x2, x3 = x
+        p1 = self.p1_proj(x1)
+        p2 = self.p2_proj(x2)
+        p3 = self.p3_proj(x3)
 
-        Args:
-            x (list[torch.Tensor]): List of [x_kv, x_q].
-                x_kv: (B, c1, H_kv, W_kv) key/value features.
-                x_q:  (B, c2, H_q, W_q) query features; output resolution matches this.
+        base_h, base_w = p3.shape[2], p3.shape[3]
+        t1 = self._to_blocks(p1, base_h, base_w, name="x1")
+        t2 = self._to_blocks(p2, base_h, base_w, name="x2")
+        t3 = self._to_blocks(p3, base_h, base_w, name="x3")
 
-        Returns:
-            (torch.Tensor): Fused features of shape (B, c3, H_q, W_q).
-        """
-        x_kv, x_q = x
-        B = x_q.shape[0]
-        H_q, W_q = x_q.shape[2], x_q.shape[3]
-        H_kv, W_kv = x_kv.shape[2], x_kv.shape[3]
-        C = self._c2
-        heads = self.head_num
-        dim = self.head_dim
+        memory = self._self_attention(torch.cat((t1, t2, t3), dim=3))
+        o1 = self._cross_attention(t1, memory)
+        o2 = self._cross_attention(t2, memory)
+        o3 = self._cross_attention(t3, memory)
 
-        # Project both inputs to internal working dimension c2
-        kv = self.kv_proj(x_kv)
-        q_feat = self.q_proj(x_q)
+        h1, w1 = p1.shape[2], p1.shape[3]
+        out1 = self._blocks_to_map(o1, h1 // base_h, w1 // base_w)
+        out2 = self._blocks_to_map(o2, p2.shape[2] // base_h, p2.shape[3] // base_w)
+        out3 = self._blocks_to_map(o3, 1, 1)
 
-        # Normalize
-        q = self._apply_ln(q_feat, self.norm_q)
-        kv = self._apply_ln(kv, self.norm_kv)
+        out1 = self.out1_proj(out1)
+        out2 = self.out2_proj(out2)
+        out3 = self.out3_proj(out3)
+        return [out1, out2, out3]
 
-        if H_kv > H_q:
-            # DOWNSAMPLE: kv has higher spatial resolution than q.
-            # Fold kv into factor x factor spatial tokens per q position, then cross-attend.
-            # Requires H_kv and W_kv to be exact multiples of H_q and W_q respectively.
-            factor_h = H_kv // H_q
-            factor_w = W_kv // W_q
-            # (B, C, H_q*fh, W_q*fw) -> (B, C, H_q, W_q, fh*fw)
-            kv = kv.reshape(B, C, H_q, factor_h, W_q, factor_w)
-            kv = kv.permute(0, 1, 2, 4, 3, 5).reshape(B, C, H_q, W_q, factor_h * factor_w)
-            n_tokens = factor_h * factor_w
 
-            # q: (B, heads, HW, 1, dim)
-            q_mh = q.reshape(B, heads, dim, H_q * W_q).permute(0, 1, 3, 2).unsqueeze(3)
-            # kv: (B, heads, HW, n_tokens, dim)
-            kv_mh = kv.reshape(B, heads, dim, H_q * W_q, n_tokens).permute(0, 1, 3, 4, 2)
+class SpatialMeanCenter(nn.Module):
+    """Center each channel map by subtracting its spatial mean."""
 
-            # Cross-attention: (1, dim) @ (dim, f*f) -> (1, f*f), then (1, f*f) @ (f*f, dim) -> (1, dim)
-            attn = torch.matmul(q_mh, kv_mh.transpose(-2, -1)) * self.scale
-            attn = torch.softmax(attn, dim=-1)
-            out = torch.matmul(attn, kv_mh).squeeze(3)  # (B, heads, HW, dim)
-            out = out.permute(0, 1, 3, 2).reshape(B, C, H_q, W_q)
+    def forward(self, x):
+        """Apply per-(B, C) mean subtraction over H and W."""
+        return x - x.mean(dim=(-2, -1), keepdim=True)
 
-        elif H_kv < H_q:
-            # UPSAMPLE: kv has lower spatial resolution than q.
-            # Expand kv to match q spatial size, then element-wise gated attention.
-            kv_up = F.interpolate(kv, size=(H_q, W_q), mode="nearest")
 
-            q_mh = q.reshape(B, heads, dim, H_q, W_q)
-            kv_mh = kv_up.reshape(B, heads, dim, H_q, W_q)
+class LinearScaling(nn.Module):
+    """Linearly scale each channel map to the [0, 1] range."""
 
-            attn = (q_mh * kv_mh) * self.scale
-            attn = torch.sigmoid(attn)
-            out = attn * kv_mh
-            out = out.reshape(B, C, H_q, W_q)
-
-        else:
-            # Same resolution: element-wise attention
-            q_mh = q.reshape(B, heads, dim, H_q, W_q)
-            kv_mh = kv.reshape(B, heads, dim, H_q, W_q)
-
-            attn = (q_mh * kv_mh) * self.scale
-            attn = torch.sigmoid(attn)
-            out = attn * kv_mh
-            out = out.reshape(B, C, H_q, W_q)
-
-        # Residual connection + LayerNorm + output projection
-        out = self._apply_ln(out + q_feat, self.norm_out)
-        return self.out_proj(out)
+    def forward(self, x):
+        """Scale per-(B, C) minimum to 0 and maximum to 1."""
+        m = x.amin(dim=(-2, -1), keepdim=True)
+        M = x.amax(dim=(-2, -1), keepdim=True)
+        return (x - m) / (M - m + 1e-6)

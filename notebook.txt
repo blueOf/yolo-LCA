@@ -166,17 +166,32 @@ runs/train/yolo11-fast-dert-noca
 需要修改N的逻辑 避免重复的unfold，优化unfold，或者计算算法
 
 
+沿着改进模块相同的思想，我们提出了fusionblock，这个模块替代了yolo11的检测头，减轻了计算量的同时维系了训练集上map50的提高，
+map50-95的不变
+经过检查损失可以发现测试集map50，map50-95缺少提升，这点归根于box_loss 与dfl_loss的提高，说明该模块有效提取空间上四周的特征来
+辅助cls识别，但是因此会模糊边界，因为自身特征图更加靠近目标特征，因此我们需要新的解决方案
 
-python ./train.py ultralytics/cfg/models/mobilent/yolo11-seJF-v5.yaml --batch=64 --device=5 --workers=8
 
-python ./train.py ultralytics/cfg/models/11/yolo11.yaml --batch=64 --device=7
-python ./train.py ultralytics/cfg/models/mobilent/yolo11-mba.yaml --batch=64 --device=6
+事实证明对于这个数据集降低nms的iou阈值 会提升map50以及其他指标 但这是普遍提升，不能说明模型的优越性
+修改后处理为WBF效果不如NMS
+
+模块的注意力头数与指标正相关，但是头数与时间基本线性相关，代价很大，尤其是在sight大时
+目前模块最优参数 142
+
+fusion 原版被改为了 对于三尺寸的两次注意力融合的残差模块，完全替代了整个neck
+fusionv2版本则是 同意去掉了layernorm 
+
+FastLocalDETRBlock 重新构造了FastLocalDETR 的reshape操作，使得代码更加符合逻辑，但是结果是 242下下降很多 282下指标下降0.3，142下指标下降0.5但是速度提升一倍
+FastLocalDETRBlockv2  版本性能很差 可以舍弃
+
+根据模型金字塔fusion后输出的热力图，我们可以看出整个特征图的特征向量都是相似的，都别学习为了一个大方向的细小分支，这导致了区分度的底下，
+也就是模型的梯度反向传播的缺点，无论是否是目标，都会向着目标倾斜
+
+延伸注意力，顺着block自行决定延申方向
 
 
-python valid.py runs/train/yolo113/weights/best.pt --device=6
-
-python valid.py runs/train/yolo11-mba/weights/best.pt
-
+修改了ultralytics/utils/metrics.py 中的 0.1 if conf in {None, 0.01 if is_obb else 0.001} else conf  原始0.25
+对于未来valid画图部分和矩阵有影响，对于指标没有
 
 
 常用指令

@@ -96,13 +96,13 @@ def main():
         name=model_name,
         amp=True,
         workers=args.workers,
-        # resume=True,
+        resume=True,
         patience=args.patience,
         device=args.device,
         cache=args.cache,
         # box=10,
         # cls=1,
-        # dfl=1.5,
+        # dfl=2,
         # mixup=0.1,
     )
 

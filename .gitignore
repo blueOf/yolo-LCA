@@ -2,5 +2,6 @@ valid/
 
 runs/
 
+datasets/
 __pycache__/
 *.pyc

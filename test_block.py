@@ -4,9 +4,87 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 from thop import profile
+from ultralytics.nn.modules.transformer import LayerNorm2d
 
 
-class FastLocalDETRBlock(nn.Module):
+class FusionBlockv2(nn.Module):
+    def __init__(self, c1, c2, c3):
+        """Initialize FusionBlock.
+
+        Args:
+            c1 (int): Channels of kv input (first input).
+            c2 (int): Channels of q input (second input), also the internal working dimension.
+            c3 (int): Output channels.
+            head_num (int): Number of attention heads.
+        """
+        super().__init__()
+        # Ensure head_num evenly divides c2
+        self.kv_proj = Conv(c1, c2, 1)
+        self.q_proj = Conv(c2, c2, 1)
+        self.norm_q = nn.LayerNorm(c2)
+        self.norm_kv = nn.LayerNorm(c2)
+        self.norm_out = nn.LayerNorm(c2)
+        self.out_proj = Conv(c2, c3, 1)
+        self._c2 = c2
+        self.scale = self._c2**-0.5
+
+    def _apply_ln(self, x, norm):
+        """Apply LayerNorm on the channel dimension of a (B, C, H, W) tensor."""
+        return norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
+
+    def forward(self, x):
+        """Forward pass fusing two multi-scale feature maps.
+
+        Args:
+            x (list[torch.Tensor]): List of [x_kv, x_q].
+                x_kv: (B, c1, H_kv, W_kv) key/value features.
+                x_q:  (B, c2, H_q, W_q) query features; output resolution matches this.
+
+        Returns:
+            (torch.Tensor): Fused features of shape (B, c3, H_q, W_q).
+        """
+        x_kv, x_q = x
+        B = x_q.shape[0]
+        H_q, W_q = x_q.shape[2], x_q.shape[3]
+        H_kv, W_kv = x_kv.shape[2], x_kv.shape[3]
+        C = self._c2
+        kv = self.kv_proj(x_kv)
+        q = self.q_proj(x_q)
+
+        q = self._apply_ln(q, self.norm_q)
+        kv = self._apply_ln(kv, self.norm_kv)
+        if H_kv > H_q:
+            factor_h = H_kv // H_q
+            factor_w = W_kv // W_q
+            kv = kv.reshape(B, C, H_q, factor_h, W_q, factor_w)
+            kv = kv.permute(0, 2, 4, 3, 5, 1).reshape(
+                B, H_q, W_q, factor_h * factor_w, C
+            )
+            q = q.permute(0, 2, 3, 1).unsqueeze(3)  # (B, H_q, W_q, 1, C)
+        else:
+            factor_h = H_q // H_kv
+            factor_w = W_q // W_kv
+            q = q.reshape(B, C, H_kv, factor_h, H_kv, factor_w)
+            q = q.permute(0, 2, 4, 3, 5, 1).reshape(
+                B, H_kv, H_kv, factor_h * factor_w, C
+            )
+            kv = kv.permute(0, 2, 3, 1).unsqueeze(3)  # (B, H_kv, W_kv, 1, C)
+
+        attn = torch.matmul(q, kv.transpose(-2, -1)) * self.scale
+        attn = torch.softmax(attn, dim=-1)
+        out = (
+            torch.matmul(attn, kv)
+            .reshape(B, H_q, W_q, C)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
+
+        # Residual connection + LayerNorm + output projection
+        out = self._apply_ln(out + x_q, self.norm_out)
+        return self.out_proj(out)
+
+
+class FastLocalDETR(nn.Module):
     def __init__(self, c, cout, sight=2, head_num=4, N=1):
         super().__init__()
         self.c, self.cout, self.sight, self.head_num, self.N = (
@@ -21,7 +99,6 @@ class FastLocalDETRBlock(nn.Module):
         self.proj = nn.Linear(c, cout) if c != cout else nn.Identity()
 
         # 核心点：用 1x1 卷积代替 Linear，并放在最前面
-        # 这样 unfold 的就是投影后的结果，减少后续计算
         self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
 
         self.layers = nn.ModuleList(
@@ -46,6 +123,7 @@ class FastLocalDETRBlock(nn.Module):
         B, C, H, W = x.shape
         ks, Np = self.kernel_size, self.kernel_size**2
 
+        # 1. Norm 依然需要
         x = (
             self.input_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
         )  # (B, C, H, W)
@@ -66,7 +144,6 @@ class FastLocalDETRBlock(nn.Module):
                 1, 2
             )  # (B*L, Np,head_num，C//head_num) -> (B*L, head_num, Np, C//head_num)
             k_nb = k_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            print(q_nb.shape, k_nb.shape)  # 调试输出
             attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
 
             attn = F.softmax(attn, dim=-1)
@@ -96,6 +173,176 @@ class FastLocalDETRBlock(nn.Module):
                 x = center_x.transpose(1, 2).view(B, C, H, W).contiguous()
 
         return self.proj(center_x).transpose(1, 2).view(B, self.cout, H, W)
+
+
+class FastLocalDETRBlockBackup(nn.Module):
+    def __init__(self, c, cout, sight=2, head_num=4, N=1):
+        super().__init__()
+        self.c, self.cout, self.sight, self.head_num, self.N = (
+            c,
+            cout,
+            sight,
+            head_num,
+            N,
+        )
+        self.kernel_size = 2 * sight + 1
+        self.input_norm = LayerNorm2d(c)
+        self.proj = nn.Conv(c, cout, 1) if c != cout else nn.Identity()
+
+        # 核心点：用 1x1 卷积代替 Linear，并放在最前面
+        self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
+
+        self.layers = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    {
+                        "qkv_conv": Conv(c, 3 * c, 1),  # 一次性完成邻居的 QKV
+                        "norm_sa": nn.LayerNorm(
+                            c // head_num,
+                        ),
+                        "q_center": nn.Linear(c, c),
+                        "norm_ca": LayerNorm2d(
+                            c,
+                        ),
+                        "ffn": nn.Sequential(Conv(c, c * 4, 1), Conv(c * 4, c, 1)),
+                        "norm_ffn": LayerNorm2d(c),
+                    }
+                )
+                for _ in range(N)
+            ]
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        ks, Np = self.kernel_size, self.kernel_size**2
+
+        center_x = self.input_norm(x)
+        # .permute(
+        #    0, 2, 3, 1
+        # )  # (B, H, W, C)  # (B, C, H, W) -> (B,H*W,self.head_num,C//self.head_num)
+
+        for layer in self.layers:
+            qkv = layer["qkv_conv"](center_x)  # (B, 3C, H, W)
+            qkv_nb = (
+                self.unfold(qkv)
+                .view(B, 3, self.head_num, C // self.head_num, Np, H * W)
+                .permute(0, 1, 5, 2, 4, 3)
+                .contiguous()
+            )  # (B, 3, L,head_num, NP, C // self.head_num)
+            q_nb = qkv_nb[:, 0]
+            k_nb = qkv_nb[:, 1]
+            v_nb = qkv_nb[:, 2]
+
+            attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
+
+            attn = F.softmax(attn, dim=-1)
+
+            nb_encoded = attn @ v_nb
+            nb_encoded = layer["norm_sa"](nb_encoded + q_nb)
+
+            # --- CA ---
+            qc = layer["q_center"](
+                center_x.reshape(B, C, H * W).transpose(1, 2)
+            ).reshape(B, H * W, self.head_num, 1, C // self.head_num)
+            kc = nb_encoded
+            vc = kc
+
+            attn_c = F.softmax(
+                (qc @ kc.transpose(-2, -1)) * ((C // self.head_num) ** -0.5), dim=-1
+            )
+            ca_out = attn_c @ vc
+            ca_out = ca_out.permute(0, 2, 3, 4, 1).reshape(B, C, H, W)
+
+            center_x = layer["norm_ca"](center_x + ca_out)
+            center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
+
+        return self.proj(center_x)
+
+
+class FastLocalDETRBlock(nn.Module):
+    def __init__(self, c, cout, sight=2, head_num=4, N=1):
+        super().__init__()
+        self.c, self.cout, self.sight, self.head_num, self.N = (
+            c,
+            cout,
+            sight,
+            head_num,
+            N,
+        )
+        self.kernel_size = 2 * sight + 1
+        self.input_norm = LayerNorm2d(c)
+        self.proj = nn.Conv(c, cout, 1) if c != cout else nn.Identity()
+
+        # 核心点：用 1x1 卷积代替 Linear，并放在最前面
+        self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
+
+        self.layers = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    {
+                        "qkv_conv": Conv(c, 3 * c, 1),  # 一次性完成邻居的 QKV
+                        "norm_sa": nn.LayerNorm(
+                            c // head_num,
+                        ),
+                        "q_center": nn.Linear(c, c),
+                        "norm_ca": LayerNorm2d(
+                            c,
+                        ),
+                        "ffn": nn.Sequential(Conv(c, c * 4, 1), Conv(c * 4, c, 1)),
+                        "norm_ffn": LayerNorm2d(c),
+                    }
+                )
+                for _ in range(N)
+            ]
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        ks, Np = self.kernel_size, self.kernel_size**2
+
+        center_x = self.input_norm(x)
+        # .permute(
+        #    0, 2, 3, 1
+        # )  # (B, H, W, C)  # (B, C, H, W) -> (B,H*W,self.head_num,C//self.head_num)
+
+        for layer in self.layers:
+            qkv = layer["qkv_conv"](center_x)  # (B, 3C, H, W)
+            qkv_nb = (
+                self.unfold(qkv)
+                .permute(0, 2, 1)
+                .reshape(-1, 3, self.head_num, Np, C // self.head_num)
+                # .view(B, 3, self.head_num, C // self.head_num, Np, H * W)
+                # .permute(0, 1, 5, 2, 4, 3)
+                # .contiguous()
+            )  # (B, 3, L,head_num, NP, C // self.head_num)
+            q_nb = qkv_nb[:, 0]
+            k_nb = qkv_nb[:, 1]
+            v_nb = qkv_nb[:, 2]
+
+            attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
+
+            attn = F.softmax(attn, dim=-1)
+
+            nb_encoded = attn @ v_nb
+            nb_encoded = layer["norm_sa"](nb_encoded + q_nb)
+
+            # --- CA ---
+            qc = layer["q_center"](
+                center_x.reshape(B, C, H * W).transpose(1, 2)
+            ).reshape(-1, self.head_num, 1, C // self.head_num)
+            kc = nb_encoded
+            vc = kc
+
+            attn_c = F.softmax(
+                (qc @ kc.transpose(-2, -1)) * ((C // self.head_num) ** -0.5), dim=-1
+            )
+            ca_out = attn_c @ vc
+            ca_out = ca_out.reshape(B, H * W, C).permute(0, 2, 1).reshape(B, C, H, W)
+
+            center_x = layer["norm_ca"](center_x + ca_out)
+            center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
+
+        return self.proj(center_x)
 
 
 class ConvWithAttention(nn.Module):
@@ -324,158 +571,59 @@ class FastLocalDETR_PE(nn.Module):
         return self.proj(center_x).transpose(1, 2).view(B, self.cout, H, W)
 
 
-class FastLocalDETR_PE_orin(nn.Module):
-
-    def __init__(self, c, cout, sight=2, head_num=4, N=1):
-        super().__init__()
-        self.c, self.cout, self.sight, self.head_num, self.N = (
-            c,
-            cout,
-            sight,
-            head_num,
-            N,
-        )
-        self.kernel_size = 2 * sight + 1
-        self.input_norm = nn.LayerNorm(c)
-        self.proj = nn.Linear(c, cout) if c != cout else nn.Identity()
-
-        # 核心点：用 1x1 卷积代替 Linear，并放在最前面
-        # 这样 unfold 的就是投影后的结果，减少后续计算
-        self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
-
-        self.layers = nn.ModuleList(
-            [
-                nn.ModuleDict(
-                    {
-                        "qkv_conv": nn.Conv2d(c, 3 * c, 1),  # 一次性完成邻居的 QKV
-                        "norm_sa": nn.LayerNorm(c),
-                        "q_center": nn.Linear(c, c),
-                        "norm_ca": nn.LayerNorm(c),
-                        "ffn": nn.Sequential(
-                            nn.Linear(c, c * 4), nn.GELU(), nn.Linear(c * 4, c)
-                        ),
-                        "norm_ffn": nn.LayerNorm(c),
-                    }
-                )
-                for _ in range(N)
-            ]
-        )
-        self.row_pos_embed = nn.Parameter(torch.randn(self.kernel_size**2, 1) * 0.02)
-        self.col_pos_embed = nn.Parameter(torch.randn(1, c) * 0.02)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        ks, Np = self.kernel_size, self.kernel_size**2
-
-        # 1. Norm 依然需要
-        x = (
-            self.input_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
-        )  # (B, C, H, W)
-
-        pos_embed = self.row_pos_embed + self.col_pos_embed  # (Np, C)
-        center_x = x.flatten(2).transpose(1, 2)  # (B, L, C)
-        center_x = center_x + pos_embed[(Np - 1) // 2, :]  # 添加中心位置编码
-
-        for i, layer in enumerate(self.layers):
-            # 核心优化：单次 Unfold，直接处理 QKV
-            qkv = layer["qkv_conv"](x)  # (B, 3C, H, W)
-            # 一次映射 + 一次滑动窗口 = 最小显存开销
-            qkv_nb = (
-                self.unfold(qkv)
-                .view(B, 3, C, Np, H * W)
-                .permute(0, 1, 4, 3, 2)
-                .contiguous()
-            )  # (B, 3, L, NP, C)
-
-            # 只在第一层循环时添加位置编码
-            if i == 0:
-                qkv_nb = qkv_nb + pos_embed
-
-            q_nb = qkv_nb[:, 0].reshape(-1, Np, C)  # (B*L, Np, C)
-            k_nb = qkv_nb[:, 1].reshape(-1, Np, C)
-            v_nb = qkv_nb[:, 2].reshape(-1, Np, C)
-
-            # --- SA ---
-            q_nb = q_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )  # (B*L, Np,head_num，C//head_num) -> (B*L, head_num, Np, C//head_num)
-            k_nb = k_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
-
-            attn = F.softmax(attn, dim=-1)
-
-            v_nb = v_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            nb_encoded = (attn @ v_nb).transpose(1, 2).reshape(-1, Np, C)
-            nb_encoded = layer["norm_sa"](nb_encoded)  # 这里简化了残差以测试速度
-
-            # --- CA ---
-            qc = (
-                layer["q_center"](center_x)
-                .view(-1, 1, self.head_num, C // self.head_num)
-                .transpose(1, 2)
-            )
-            kc = nb_encoded.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )
-            vc = kc  # 简化演示
-
-            attn_c = F.softmax((qc @ kc.transpose(-2, -1)) * (C**-0.5), dim=-1)
-            ca_out = (attn_c @ vc).transpose(1, 2).reshape(B, H * W, C)
-
-            center_x = layer["norm_ca"](center_x + ca_out)
-            center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
-
-            if self.N > 1:
-                x = center_x.transpose(1, 2).view(B, C, H, W).contiguous()
-
-        return self.proj(center_x).transpose(1, 2).view(B, self.cout, H, W)
-
-
 if __name__ == "__main__":
-    from thop import profile
+    import time
 
     # 设定参数
     C = 64
     H = W = 80
-    N = 2
     sight = 2
+    head_num = 2
+    N = 2
+    iterations = 100  # 循环次数
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 初始化模块
-    block = FastLocalDETR_PE(c=C, cout=C, sight=sight, head_num=4, N=N)
-    x = torch.randn((1, C, H, W))
+    block_a = FastLocalDETRBlock(C, C, sight=sight, head_num=head_num, N=N).to(device)
+    block_b = FastLocalDETR(C, C, sight=sight, head_num=head_num, N=N).to(device)
 
-    # 定义自定义算子逻辑以包含矩阵乘法 (SA 和 CA 中的 @ 运算)
-    # thop 默认只统计 nn.Module 的参数和计算逻辑
-    # 我们通过 profile 运行并打印
-    flops, params = profile(block, inputs=(x,))
+    x = torch.randn((1, C, H, W)).to(device)
 
+    # 预热
+    print("Warming up...")
+    for _ in range(10):
+        _ = block_a(x)
+        _ = block_b(x)
+
+    torch.cuda.synchronize()
+
+    # 测试 FastLocalDETRBlock (使用 pipeline_a 风格逻辑的模块)
+    print(f"Testing FastLocalDETRBlock over {iterations} iterations...")
+    t0 = time.time()
+    for _ in range(iterations):
+        _ = block_a(x)
+    torch.cuda.synchronize()
+    t1 = time.time()
+    avg_a = (t1 - t0) / iterations * 1000
+    print(f"FastLocalDETRBlock (Correct logic) average time: {avg_a:.3f} ms")
+
+    # 测试 FastLocalDETR (使用 pipeline_b 风格逻辑的模块)
+    print(f"Testing FastLocalDETR over {iterations} iterations...")
+    t0 = time.time()
+    for _ in range(iterations):
+        _ = block_b(x)
+    torch.cuda.synchronize()
+    t1 = time.time()
+    avg_b = (t1 - t0) / iterations * 1000
+    print(f"FastLocalDETR (Incorrect logic) average time: {avg_b:.3f} ms")
+
+    # 计算 FLOPs 和 Params
+    from thop import profile
+
+    flops_a, params_a = profile(block_a, inputs=(x,), verbose=False)
+    flops_b, params_b = profile(block_b, inputs=(x,), verbose=False)
     print("-" * 30)
-    print(f"Input Shape: {x.shape}")
-    print(f"Final FLOPs: {flops / 1e9:.3f} G")
-    print(f"Final Params: {params / 1e6:.3f} M")
-
-    # 手动计算矩阵运算部分的 FLOPs (thop 可能遗失的部分)
-    # L = 80*80 = 6400, Np = 5*5 = 25
-    # SA: q(Np, head_dim) @ k(head_dim, Np) -> (Np, Np) 每一行都有一个 L
-    # FLOPs_SA = B * L * head * Np * Np * head_dim * 2
-    L = H * W
-    Np = (2 * sight + 1) ** 2
-    head = 4
-    head_dim = C // head
-
-    # SA 矩阵乘法约为: B * L * head * Np * Np * head_dim * 2
-    # CA 矩阵乘法约为: B * L * head * 1 * Np * head_dim * 2
-    # 这里记得乘以 N 层，因为每一层都有这些运算
-    sa_matmul_flops = N * (1 * L * head * Np * Np * head_dim * 2)
-    ca_matmul_flops = N * (1 * L * head * 1 * Np * head_dim * 2)
-
-    print(
-        f"Theoretical SA MatMul FLOPs (Total for {N} layers): {sa_matmul_flops / 1e6:.2f} M"
-    )
-    print(
-        f"Theoretical CA MatMul FLOPs (Total for {N} layers): {ca_matmul_flops / 1e6:.2f} M"
-    )
+    print(f"Block A - FLOPs: {flops_a/1e9:.3f} G, Params: {params_a/1e6:.3f} M")
+    print(f"Block B - FLOPs: {flops_b/1e9:.3f} G, Params: {params_b/1e6:.3f} M")
     print("-" * 30)
-
-    out = block(x)
-    print(f"Output shape: {out.shape}")

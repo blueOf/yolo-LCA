@@ -59,7 +59,10 @@ def validate_on_svrdd(model, save_dir, device="0"):
             save_json=True,
             plots=True,
             verbose=True,
+            #batch=1,
             # visualize=True,
+            # conf=0.25,
+            # iou=0.6,
         )
     val_output = f.getvalue()
 

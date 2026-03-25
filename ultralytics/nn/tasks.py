@@ -76,10 +76,11 @@ from ultralytics.nn.modules import (
     C2PSA_1,
     CKAS_DAF,
     FastLocalDETR,
-    FastLocalDETR_PE,
     ConvWithAttention,
     FastLocalDETRBlock,
     FusionBlock,
+    SpatialMeanCenter,
+    LinearScaling,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -885,7 +886,13 @@ class RTDETRDetectionModel(DetectionModel):
             tv_sd = tv_model.state_dict()
             model_sd = self.state_dict()
             mapped = {}
-            bn_params = ["weight", "bias", "running_mean", "running_var", "num_batches_tracked"]
+            bn_params = [
+                "weight",
+                "bias",
+                "running_mean",
+                "running_var",
+                "num_batches_tracked",
+            ]
 
             def _map_conv_bn(tv_conv_key, tv_bn_key, model_path):
                 """Map a torchvision conv+bn pair to the custom Conv module weights."""
@@ -895,7 +902,9 @@ class RTDETRDetectionModel(DetectionModel):
                     if tv_sd[src].shape == model_sd[dst].shape:
                         mapped[dst] = tv_sd[src]
                     elif verbose:
-                        LOGGER.warning(f"Shape mismatch for {src}: {tv_sd[src].shape} vs {model_sd[dst].shape}")
+                        LOGGER.warning(
+                            f"Shape mismatch for {src}: {tv_sd[src].shape} vs {model_sd[dst].shape}"
+                        )
                 for p in bn_params:
                     src = f"{tv_bn_key}.{p}"
                     dst = f"{model_path}.bn.{p}"
@@ -903,7 +912,9 @@ class RTDETRDetectionModel(DetectionModel):
                         if tv_sd[src].shape == model_sd[dst].shape:
                             mapped[dst] = tv_sd[src]
                         elif verbose:
-                            LOGGER.warning(f"Shape mismatch for {src}: {tv_sd[src].shape} vs {model_sd[dst].shape}")
+                            LOGGER.warning(
+                                f"Shape mismatch for {src}: {tv_sd[src].shape} vs {model_sd[dst].shape}"
+                            )
 
             # Map stem weights (7x7 conv + bn)
             _map_conv_bn("conv1", "bn1", "model.0.layer.0")
@@ -937,7 +948,9 @@ class RTDETRDetectionModel(DetectionModel):
                 )
         except Exception as e:
             if verbose:
-                LOGGER.warning(f"WARNING ⚠️ Could not load pretrained {model_name} backbone weights: {e}")
+                LOGGER.warning(
+                    f"WARNING ⚠️ Could not load pretrained {model_name} backbone weights: {e}"
+                )
 
     def _apply(self, fn):
         """Apply a function to all tensors in the model, including decoder anchors and valid mask.
@@ -1912,7 +1925,6 @@ def parse_model(d, ch, verbose=True):
             C2PSA_1,
             CKAS_DAF,
             FastLocalDETR,
-            FastLocalDETR_PE,
             ConvWithAttention,
             FastLocalDETRBlock,
         }
@@ -1997,13 +2009,14 @@ def parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         elif m is FusionBlock:
-            c1 = ch[f[0]]  # kv input channels (already scaled)
-            c2_in = ch[f[1]]  # q input channels (already scaled)
-            c3 = args[0]  # output channels (needs scaling)
-            if c3 != nc:
-                c3 = make_divisible(min(c3, max_channels) * width, 8)
-            c2 = c3
-            args = [c1, c2_in, c3, *args[1:]]
+            c1 = ch[f[0]]
+            c2_in = ch[f[1]]
+            c3_in = ch[f[2]]
+            c4 = args[0]
+            if c4 is None:
+                c4 = [c1, c2_in, c3_in]
+            args = [c1, c2_in, c3_in, c4, *args[1:]]
+
         elif m in frozenset(
             {
                 Detect,

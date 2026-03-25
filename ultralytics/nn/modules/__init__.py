@@ -63,10 +63,11 @@ from .block import (
     C2PSA_1,
     CKAS_DAF,
     FastLocalDETR,
-    FastLocalDETR_PE,
     ConvWithAttention,
     FastLocalDETRBlock,
     FusionBlock,
+    SpatialMeanCenter,
+    LinearScaling,
 )
 from .conv import (
     CBAM,
@@ -196,4 +197,5 @@ __all__ = (
     "YOLOESegment26",
     "v10Detect",
     "FusionBlock",
+    "SpatialMeanCenter",
 )
