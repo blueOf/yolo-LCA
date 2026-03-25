@@ -24,6 +24,10 @@ class NeckContrastiveConfig:
     max_bg_samples_per_image: int = 256
     max_pos_samples_per_class: int = 256
     margin: float = 0.2
+    inter_class_margin: float = 0.2
+    pull_weight: float = 1.0
+    inter_class_weight: float = 0.3
+    bg_weight: float = 1.0
     use_detection_loss: bool = False
     freeze_head: bool = True
 
@@ -88,6 +92,10 @@ class NeckContrastiveLoss(torch.nn.Module):
         max_bg_samples_per_image: int = 256,
         max_pos_samples_per_class: int = 256,
         margin: float = 0.2,
+        inter_class_margin: float = 0.2,
+        pull_weight: float = 1.0,
+        inter_class_weight: float = 0.3,
+        bg_weight: float = 1.0,
         eps: float = 1e-8,
     ):
         super().__init__()
@@ -95,6 +103,10 @@ class NeckContrastiveLoss(torch.nn.Module):
         self.max_bg_samples_per_image = max_bg_samples_per_image
         self.max_pos_samples_per_class = max_pos_samples_per_class
         self.margin = margin
+        self.inter_class_margin = inter_class_margin
+        self.pull_weight = pull_weight
+        self.inter_class_weight = inter_class_weight
+        self.bg_weight = bg_weight
         self.eps = eps
 
     @staticmethod
@@ -158,31 +170,46 @@ class NeckContrastiveLoss(torch.nn.Module):
             if bg.numel():
                 bg_vectors.append(self._sample_rows(bg, self.max_bg_samples_per_image))
 
-        pull_terms, push_terms = [], []
+        pull_terms, bg_push_terms, inter_class_push_terms = [], [], []
         bg_pool = torch.cat(bg_vectors, dim=0) if bg_vectors else None
         if bg_pool is not None:
             bg_pool = F.normalize(bg_pool, dim=1, eps=self.eps)
 
+        normalized_class_vectors: list[torch.Tensor] = []
         for vectors_list in class_vectors.values():
             vectors = torch.cat(vectors_list, dim=0)
             vectors = self._sample_rows(vectors, self.max_pos_samples_per_class)
             vectors = F.normalize(vectors, dim=1, eps=self.eps)
+            normalized_class_vectors.append(vectors)
             if vectors.shape[0] >= 2:
                 sim = vectors @ vectors.transpose(0, 1)
                 mask = torch.triu(torch.ones_like(sim, dtype=torch.bool), diagonal=1)
                 pull_terms.append(1.0 - sim[mask].mean())
             if bg_pool is not None and vectors.shape[0] > 0:
                 neg_sim = vectors @ bg_pool.transpose(0, 1)
-                push_terms.append(F.relu(neg_sim - self.margin).mean())
+                bg_push_terms.append(F.relu(neg_sim - self.margin).mean())
 
-        if not pull_terms and not push_terms:
+        for i in range(len(normalized_class_vectors)):
+            vi = normalized_class_vectors[i]
+            if vi.shape[0] == 0:
+                continue
+            for j in range(i + 1, len(normalized_class_vectors)):
+                vj = normalized_class_vectors[j]
+                if vj.shape[0] == 0:
+                    continue
+                inter_sim = vi @ vj.transpose(0, 1)
+                inter_class_push_terms.append(F.relu(inter_sim - self.inter_class_margin).mean())
+
+        if not pull_terms and not bg_push_terms and not inter_class_push_terms:
             return feat.sum() * 0.0
 
         loss = feat.new_tensor(0.0)
         if pull_terms:
-            loss = loss + torch.stack(pull_terms).mean()
-        if push_terms:
-            loss = loss + torch.stack(push_terms).mean()
+            loss = loss + self.pull_weight * torch.stack(pull_terms).mean()
+        if inter_class_push_terms:
+            loss = loss + self.inter_class_weight * torch.stack(inter_class_push_terms).mean()
+        if bg_push_terms:
+            loss = loss + self.bg_weight * torch.stack(bg_push_terms).mean()
         return loss
 
     def forward(self, features: list[torch.Tensor], batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -205,6 +232,10 @@ class NeckContrastiveTrainer:
             max_bg_samples_per_image=config.max_bg_samples_per_image,
             max_pos_samples_per_class=config.max_pos_samples_per_class,
             margin=config.margin,
+            inter_class_margin=config.inter_class_margin,
+            pull_weight=config.pull_weight,
+            inter_class_weight=config.inter_class_weight,
+            bg_weight=config.bg_weight,
         )
         self._apply_head_freeze()
 
