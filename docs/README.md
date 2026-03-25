@@ -5,20 +5,50 @@ This directory contains complete documentation and example code for custom loss 
 
 ## 文档列表 / Document List
 
-### 1. 中文文档 / Chinese Documentation
+### 🚀 快速开始 / Quick Start (推荐先看 / Start Here)
+- **文件 / File**: `Quick-Start-5min.md`
+- **内容 / Content**: 5分钟快速入门，最小可行示例
+- **说明 / Description**: 5-minute quick start with minimal viable example
+- **适合 / For**: 想快速上手的用户 / Users who want to get started quickly
+
+### 📖 完整指南 / Complete Guides
+
+#### 1. 中文文档 / Chinese Documentation
 - **文件 / File**: `如何新增自定义Loss计算.md`
 - **内容 / Content**: 完整的中文指南，包含概念、实现步骤和最佳实践
 - **说明 / Description**: 详细介绍如何在YOLO框架下新增使用backbone指定层计算自定义Loss
+- **适合 / For**: 中文用户，需要详细理解 / Chinese users, need detailed understanding
 
-### 2. 英文文档 / English Documentation
+#### 2. 英文文档 / English Documentation
 - **文件 / File**: `How-to-Add-Custom-Loss-with-Backbone-Layers.md`
 - **内容 / Content**: Complete English guide with concepts, implementation steps, and best practices
 - **说明 / Description**: Comprehensive guide on implementing custom loss using backbone layers in YOLO
+- **适合 / For**: English users, need detailed understanding
 
-### 3. 示例代码 / Example Code
+#### 3. 完整参考指南 / Complete Reference Guide
+- **文件 / File**: `Custom-Loss-Complete-Guide.md`
+- **内容 / Content**: 架构图、模板代码、调试指南、性能优化
+- **说明 / Description**: Architecture diagrams, code templates, debugging guide, performance optimization
+- **适合 / For**: 所有用户，作为参考手册 / All users, as reference manual
+
+### 💻 示例代码 / Example Code
+
+#### 1. 基础示例 / Basic Example
 - **文件 / File**: `../example_custom_loss.py`
-- **内容 / Content**: 完整的可运行示例，实现特征一致性Loss
-- **说明 / Description**: Complete runnable example implementing feature consistency loss
+- **内容 / Content**: 特征一致性Loss实现
+- **难度 / Difficulty**: ⭐⭐☆☆☆
+- **说明 / Description**: Feature consistency loss implementation
+
+#### 2. 进阶示例 / Advanced Example
+- **文件 / File**: `../example_distillation_loss.py`
+- **内容 / Content**: 特征蒸馏Loss实现（双模型）
+- **难度 / Difficulty**: ⭐⭐⭐☆☆
+- **说明 / Description**: Feature distillation loss with teacher-student models
+
+#### 3. 工具脚本 / Utility Script
+- **文件 / File**: `../layer_probe.py`
+- **内容 / Content**: 层探测和推荐工具
+- **说明 / Description**: Layer probing and recommendation tool
 
 ## 现有参考实现 / Existing Reference Implementation
 
@@ -39,17 +69,54 @@ The codebase includes a complete reference implementation:
 
 ## 快速开始 / Quick Start
 
-### 1. 运行示例代码 / Run Example Code
+### 最快速开始（30秒）/ Fastest Start (30 seconds)
 
 ```bash
-# 确保安装依赖 / Ensure dependencies installed
-pip install torch torchvision ultralytics
+# 1. 查看推荐的特征层 / View recommended feature layers
+python layer_probe.py --model yolo11n.pt --recommend
 
-# 运行示例 / Run example
+# 2. 运行基础示例 / Run basic example
 PYTHONPATH=. python example_custom_loss.py
+
+# 3. 运行蒸馏示例 / Run distillation example
+PYTHONPATH=. python example_distillation_loss.py
 ```
 
-### 2. 使用现有实现 / Use Existing Implementation
+### 三步实现自定义Loss / Three Steps to Custom Loss
+
+#### Step 1: 确定特征层 / Determine Feature Layers
+```python
+from ultralytics import YOLO
+model = YOLO("yolo11n.pt")
+
+# 选项A: 使用neck层（推荐） / Option A: Use neck layers (recommended)
+feature_layers = list(model.model.model[-1].f)  # [16, 19, 22]
+
+# 选项B: 使用backbone层 / Option B: Use backbone layers
+feature_layers = [3, 5, 8]  # P3, P4, P5
+```
+
+#### Step 2: 实现Loss / Implement Loss
+```python
+import torch.nn as nn
+
+class MyLoss(nn.Module):
+    def forward(self, features, batch):
+        # 你的loss计算逻辑 / Your loss computation logic
+        loss = sum((feat ** 2).mean() for feat in features)
+        return loss
+```
+
+#### Step 3: 创建训练器 / Create Trainer
+```python
+# 复制 example_custom_loss.py 中的 FeatureExtractor 和 Trainer
+# Copy FeatureExtractor and Trainer from example_custom_loss.py
+
+trainer = CustomLossTrainer(model, config)
+metrics = trainer.training_step(batch, optimizer)
+```
+
+### 使用现有实现 / Use Existing Implementation
 
 ```python
 from ultralytics import YOLO
