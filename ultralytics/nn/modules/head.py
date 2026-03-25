@@ -20,7 +20,18 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
+__all__ = (
+    "OBB",
+    "Classify",
+    "ContrastDetect",
+    "Detect",
+    "Pose",
+    "RTDETRDecoder",
+    "Segment",
+    "YOLOEDetect",
+    "YOLOESegment",
+    "v10Detect",
+)
 
 
 class Detect(nn.Module):
@@ -249,6 +260,76 @@ class Detect(nn.Module):
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
+
+
+class ContrastDetect(Detect):
+    """YOLO Detect head with additional contrastive learning layers.
+
+    This class extends the standard Detect head to support contrastive loss computation on specified layers.
+    During training, it outputs both the standard detection predictions and additional feature maps for
+    contrastive learning.
+
+    The YAML format uses nested lists: [[[forward_layers], [contrastive_layers]], 1, ContrastDetect, [nc]]
+    Example: [[[16, 19, 22], [4, 6, 10]], 1, ContrastDetect, [nc]]
+
+    Attributes:
+        contrast_indices (list): Layer indices for contrastive learning (training only).
+        forward_indices (list): Layer indices for forward propagation and detection.
+    """
+
+    def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = (), contrast_ch: tuple = ()):
+        """Initialize ContrastDetect with detection and contrastive learning channels.
+
+        Args:
+            nc (int): Number of classes.
+            reg_max (int): Maximum number of DFL channels.
+            end2end (bool): Whether to use end-to-end NMS-free detection.
+            ch (tuple): Tuple of channel sizes from backbone feature maps for detection.
+            contrast_ch (tuple): Tuple of channel sizes for contrastive learning features.
+        """
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        self.contrast_ch = contrast_ch
+        self.ncl = len(contrast_ch)  # number of contrastive layers
+
+    def forward(
+        self, x: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Forward pass that includes both detection and contrastive features.
+
+        Args:
+            x (list[torch.Tensor]): Input features where x[:nl] are detection features
+                                    and x[nl:] are contrastive features.
+
+        Returns:
+            During training: dict with 'boxes', 'scores', 'feats', and 'contrast_feats'
+            During inference: standard detection output (y, preds) tuple
+        """
+        # Split input into detection and contrastive features
+        det_feats = x[: self.nl]
+        contrast_feats = x[self.nl :] if len(x) > self.nl else []
+
+        # Standard detection forward pass
+        preds = self.forward_head(det_feats, **self.one2many)
+        if self.end2end:
+            x_detach = [xi.detach() for xi in det_feats]
+            one2one = self.forward_head(x_detach, **self.one2one)
+            preds = {"one2many": preds, "one2one": one2one}
+
+        # Add contrastive features during training
+        if self.training and contrast_feats:
+            if isinstance(preds, dict) and "one2many" in preds:
+                preds["one2many"]["contrast_feats"] = contrast_feats
+            else:
+                preds["contrast_feats"] = contrast_feats
+
+        if self.training:
+            return preds
+
+        # Inference path (same as parent Detect)
+        y = self._inference(preds["one2one"] if self.end2end else preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return y if self.export else (y, preds)
 
 
 class Segment(Detect):
