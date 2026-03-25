@@ -41,6 +41,7 @@ from ultralytics.nn.modules import (
     CBLinear,
     Classify,
     Concat,
+    ContrastDetect,
     Conv,
     Conv2,
     ConvTranspose,
@@ -88,6 +89,7 @@ from ultralytics.utils.loss import (
     E2ELoss,
     PoseLoss26,
     v8ClassificationLoss,
+    v8ContrastiveDetectionLoss,
     v8DetectionLoss,
     v8OBBLoss,
     v8PoseLoss,
@@ -555,9 +557,14 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
-        return (
-            E2ELoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
-        )
+        # Check if model uses ContrastDetect head
+        head_module = self.model[-1]
+        use_contrast = isinstance(head_module, ContrastDetect)
+
+        if getattr(self, "end2end", False):
+            return E2ELoss(self, v8ContrastiveDetectionLoss if use_contrast else v8DetectionLoss)
+        else:
+            return v8ContrastiveDetectionLoss(self) if use_contrast else v8DetectionLoss(self)
 
 
 class OBBModel(DetectionModel):
@@ -2053,6 +2060,24 @@ def parse_model(d, ch, verbose=True):
                 OBB26,
             }:
                 m.legacy = legacy
+        elif m is ContrastDetect:
+            # Handle nested list format: [[[forward_indices], [contrast_indices]], 1, ContrastDetect, [nc]]
+            # f should be a nested list: [[forward_indices], [contrast_indices]]
+            forward_indices = f[0] if isinstance(f[0], list) else f
+            contrast_indices = f[1] if isinstance(f, list) and len(f) > 1 and isinstance(f[1], list) else []
+
+            # Build channel lists
+            forward_ch = [ch[x] for x in forward_indices]
+            contrast_ch = [ch[x] for x in contrast_indices] if contrast_indices else []
+
+            # ContrastDetect(nc, reg_max, end2end, ch, contrast_ch)
+            args.extend([reg_max, end2end, forward_ch, contrast_ch])
+            m.legacy = legacy
+
+            # For save list, need to flatten all indices
+            all_indices = forward_indices + (contrast_indices if contrast_indices else [])
+            f = all_indices  # Update f for save.extend later
+            c2 = forward_ch[0]  # Output channel is from first forward layer
         elif m is v10Detect:
             args.append([ch[x] for x in f])
         elif m is ImagePoolingAttn:
