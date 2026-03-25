@@ -170,6 +170,10 @@ class DetectionTrainer(BaseTrainer):
         # Check if using contrastive loss (4 components) or standard loss (3 components)
         from ultralytics.utils.loss import v8ContrastiveDetectionLoss
 
+        # Initialize criterion if it doesn't exist yet
+        if not hasattr(self, "criterion"):
+            self.criterion = self.model.init_criterion()
+
         if isinstance(self.criterion, v8ContrastiveDetectionLoss):
             self.loss_names = "box_loss", "cls_loss", "dfl_loss", "contrast_loss"
         else:
