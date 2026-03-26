@@ -11,7 +11,7 @@ def hook_fn(module, input, output):
 
 
 # 注册到你想要的层（例如第 4 层）
-layer = 9
+layer = 7
 handle = model.model.model[layer].register_forward_hook(hook_fn)
 
 model("test1.jpg")

@@ -3099,10 +3099,10 @@ class SpatialMeanCenter(nn.Module):
 
 
 class LinearScaling(nn.Module):
-    """Linearly scale each channel map to the [0, 1] range."""
+    """Linearly scale each channel map to the [-10, 10] range."""
 
     def forward(self, x):
-        """Scale per-(B, C) minimum to 0 and maximum to 1."""
-        m = x.amin(dim=(-2, -1), keepdim=True)
-        M = x.amax(dim=(-2, -1), keepdim=True)
-        return (x - m) / (M - m + 1e-6)
+        """Scale per-(B, C) minimum to -10 and maximum to 10."""
+        x = x - x.mean(dim=(-2, -1), keepdim=True)
+        m = abs(x).amax(dim=(-2, -1), keepdim=True)
+        return x * 5 / (m + 1e-6)

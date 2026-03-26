@@ -35,7 +35,10 @@ backbone:
   - [-1, 2, C3k2, [1024, True]]
   - [-1, 1, SpatialMeanCenter,[]]
   - [-1, 1, SPPF, [1024, 5]] # 9
-  - [-1, 2, C2PSA, [1024]] # 21
+  - [-1, 1, SpatialMeanCenter,[]]
+  - [-1, 2, C2PSA, [1024]] # 22
+  - [-1, 1, SpatialMeanCenter,[]] #23
+
 
 # YOLO11n head
 head:
@@ -50,13 +53,14 @@ head:
   - [-1, 1, SpatialMeanCenter,[]] #---------------------- 29
 
   - [-1, 1, Conv, [256, 3, 2]]
-  - [[-1, 25], 1, Concat, [1]] # cat head P4
+  - [[-1, 27], 1, Concat, [1]] # cat head P4
   - [-1, 2, C3k2, [512, False]] # 19 (P4/16-medium)
   - [-1, 1, SpatialMeanCenter,[]]
 
   - [-1, 1, Conv, [512, 3, 2]]
-  - [[-1, 21], 1, Concat, [1]] # cat head P5
+  - [[-1, 23], 1, Concat, [1]] # cat head P5
   - [-1, 2, C3k2, [1024, True]] # 22 (P5/32-large)
   - [-1, 1, SpatialMeanCenter,[]]
 
-  - [[29, 33, 37], 1, Detect, [nc]] # Detect(P3, P4, P5)
+  - [[[31, 35, 39], [11, 15, 23]], 1, ContrastDetect, [nc]] # ContrastDetect(P3, P4, P5) with contrastive features from layers 4, 6, 9
+
