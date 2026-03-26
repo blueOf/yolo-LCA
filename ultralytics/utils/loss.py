@@ -476,6 +476,10 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
     1. Features from the same object (foreground) to be similar
     2. Features from different objects to be dissimilar
     3. Background features to be separated from all foreground features
+
+    Dynamic weight adjustment:
+    The contrast weight can be dynamically adjusted during training to balance contrastive loss with other losses.
+    Starting from contrast_weight_init ratio, it gradually transitions to contrast_weight_final ratio.
     """
 
     def __init__(self, model, tal_topk: int = 10, tal_topk2: int | None = None, contrast_weight: float = 0.1):
@@ -485,11 +489,20 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
             model: The detection model (must be de-paralleled).
             tal_topk (int): Top-k for task-aligned assignment.
             tal_topk2 (int | None): Secondary top-k parameter.
-            contrast_weight (float): Weight for contrastive loss component.
+            contrast_weight (float): Weight for contrastive loss component (deprecated, use hyp.contrast_weight).
         """
         super().__init__(model, tal_topk, tal_topk2)
-        self.contrast_weight = contrast_weight
+        # Read from hyperparameters, fallback to parameter if not set
+        self.contrast_weight_base = getattr(self.hyp, 'contrast_weight', contrast_weight)
         self.contrast_temp = 0.07  # Temperature for contrastive loss
+
+        # Dynamic weight adjustment parameters
+        self.contrast_weight_init = getattr(self.hyp, 'contrast_weight_init', 0.1)
+        self.contrast_weight_final = getattr(self.hyp, 'contrast_weight_final', 0.1)
+        self.updates = 0
+
+        # Initialize current contrast weight with init ratio
+        self.contrast_weight = self.contrast_weight_base
 
     def compute_contrastive_loss(
         self,
@@ -620,6 +633,31 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
 
         return total_contrast_loss / max(batch_size, 1)
 
+    def update(self) -> None:
+        """Update contrast weight based on dynamic adjustment schedule.
+
+        This method implements dynamic weight adjustment for the contrast loss relative to other losses.
+        The adjustment follows a linear decay schedule from contrast_weight_init to contrast_weight_final
+        over the course of training epochs.
+
+        The weight is calculated to maintain the ratio: contrast_ratio * contrast_loss + (1-contrast_ratio) * other_loss
+        """
+        self.updates += 1
+        # Calculate current ratio based on linear decay
+        total_epochs = max(self.hyp.epochs - 1, 1)
+        progress = min(self.updates / total_epochs, 1.0)
+        current_ratio = self.contrast_weight_init + (self.contrast_weight_final - self.contrast_weight_init) * progress
+
+        # The current_ratio represents: contrast_loss / (contrast_loss + other_loss)
+        # We need to adjust contrast_weight such that when multiplied with the base contrast loss,
+        # it achieves the desired ratio with other losses
+        # If current_ratio = 0.1, we want: 0.1 * (contrast) + 0.9 * (other)
+        # Since other losses have their own weights (box, cls, dfl), we adjust contrast_weight accordingly
+
+        # Store the ratio multiplier - this will be applied to the contrast loss
+        # to achieve the desired balance with other losses
+        self.contrast_ratio = current_ratio
+
     def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate detection loss with contrastive learning component.
 
@@ -657,7 +695,28 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                 batch_idx_tensor,
             )
 
-            loss[3] = contrast_loss * self.contrast_weight
+            # Apply dynamic weighting if ratio is set (via update method)
+            if hasattr(self, 'contrast_ratio'):
+                # Get sum of other losses (already weighted by box, cls, dfl gains)
+                other_loss_sum = det_loss.sum()
+
+                # Calculate dynamic weight to achieve desired ratio
+                # We want: contrast_ratio * weighted_contrast = (1 - contrast_ratio) * other_loss_sum
+                # So: weighted_contrast = [(1 - contrast_ratio) / contrast_ratio] * other_loss_sum
+                # And: dynamic_weight = weighted_contrast / contrast_loss
+                if contrast_loss > 0 and self.contrast_ratio > 0:
+                    target_contrast_weight = (self.contrast_ratio / (1 - self.contrast_ratio)) if self.contrast_ratio < 1 else 1.0
+                    # Normalize by other_loss_sum to maintain balance
+                    if other_loss_sum > 0:
+                        dynamic_weight = target_contrast_weight * (other_loss_sum / contrast_loss)
+                    else:
+                        dynamic_weight = self.contrast_weight_base
+                    loss[3] = contrast_loss * dynamic_weight
+                else:
+                    loss[3] = contrast_loss * self.contrast_weight_base
+            else:
+                # No dynamic adjustment, use base weight
+                loss[3] = contrast_loss * self.contrast_weight
 
         # Prepare detached loss for logging
         loss_detach_full = torch.zeros(4, device=self.device)
