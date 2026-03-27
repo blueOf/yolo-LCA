@@ -636,11 +636,12 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
     def update(self) -> None:
         """Update contrast weight based on dynamic adjustment schedule.
 
-        This method implements dynamic weight adjustment for the contrast loss relative to other losses.
-        The adjustment follows a linear decay schedule from contrast_weight_init to contrast_weight_final
+        This method implements dynamic weight adjustment for the contrast loss.
+        The adjustment follows a linear interpolation from contrast_weight_init to contrast_weight_final
         over the course of training epochs.
 
-        The weight is calculated to maintain the ratio: contrast_ratio * contrast_loss + (1-contrast_ratio) * other_loss
+        The weight simply interpolates: weight = init + (final - init) * progress
+        where progress goes from 0 to 1 over the training epochs.
 
         Note: If contrast_weight_init == contrast_weight_final, no dynamic adjustment is performed,
         and the static contrast_weight is used (backward compatible with old behavior).
@@ -651,20 +652,13 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
             return  # No dynamic adjustment needed, use static contrast_weight
 
         self.updates += 1
-        # Calculate current ratio based on linear decay
+        # Calculate current weight based on linear interpolation
         total_epochs = max(self.hyp.epochs - 1, 1)
         progress = min(self.updates / total_epochs, 1.0)
-        current_ratio = self.contrast_weight_init + (self.contrast_weight_final - self.contrast_weight_init) * progress
+        current_weight = self.contrast_weight_init + (self.contrast_weight_final - self.contrast_weight_init) * progress
 
-        # The current_ratio represents: contrast_loss / (contrast_loss + other_loss)
-        # We need to adjust contrast_weight such that when multiplied with the base contrast loss,
-        # it achieves the desired ratio with other losses
-        # If current_ratio = 0.1, we want: 0.1 * (contrast) + 0.9 * (other)
-        # Since other losses have their own weights (box, cls, dfl), we adjust contrast_weight accordingly
-
-        # Store the ratio multiplier - this will be applied to the contrast loss
-        # to achieve the desired balance with other losses
-        self.contrast_ratio = current_ratio
+        # Store the current weight - this will be applied directly to the contrast loss
+        self.contrast_weight_dynamic = current_weight
 
     def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate detection loss with contrastive learning component.
@@ -703,25 +697,10 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                 batch_idx_tensor,
             )
 
-            # Apply dynamic weighting if ratio is set (via update method)
-            if hasattr(self, 'contrast_ratio'):
-                # Get sum of other losses (already weighted by box, cls, dfl gains)
-                other_loss_sum = det_loss.sum()
-
-                # Calculate dynamic weight to achieve desired ratio
-                # We want: contrast_ratio * weighted_contrast = (1 - contrast_ratio) * other_loss_sum
-                # So: weighted_contrast = [(1 - contrast_ratio) / contrast_ratio] * other_loss_sum
-                # And: dynamic_weight = weighted_contrast / contrast_loss
-                if contrast_loss > 0 and self.contrast_ratio > 0:
-                    target_contrast_weight = (self.contrast_ratio / (1 - self.contrast_ratio)) if self.contrast_ratio < 1 else 1.0
-                    # Normalize by other_loss_sum to maintain balance
-                    if other_loss_sum > 0:
-                        dynamic_weight = target_contrast_weight * (other_loss_sum / contrast_loss)
-                    else:
-                        dynamic_weight = self.contrast_weight_base
-                    loss[3] = contrast_loss * dynamic_weight
-                else:
-                    loss[3] = contrast_loss * self.contrast_weight_base
+            # Apply dynamic weighting if dynamic weight is set (via update method)
+            if hasattr(self, 'contrast_weight_dynamic'):
+                # Use the dynamically adjusted weight directly
+                loss[3] = contrast_loss * self.contrast_weight_dynamic
             else:
                 # No dynamic adjustment, use base weight
                 loss[3] = contrast_loss * self.contrast_weight

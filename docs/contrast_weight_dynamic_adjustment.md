@@ -30,14 +30,12 @@ contrast_weight_final: 0.1 # 最终对比损失比例（contrast / (contrast + o
    - 在不使用动态调整时，直接用于加权对比损失
 
 2. **contrast_weight_init** (float, 默认: 0.1)
-   - 训练开始时的对比损失占比
-   - 表示 `contrast_loss / (contrast_loss + other_losses)` 的目标比例
-   - 例如 0.1 表示：`0.1 * contrast_loss + 0.9 * (box + cls + dfl)`
+   - 训练开始时的对比损失权重
+   - 例如 0.1 表示：对比损失会乘以 0.1
 
 3. **contrast_weight_final** (float, 默认: 0.1)
-   - 训练结束时的对比损失占比
-   - 表示最终期望的损失比例
-   - 例如 0.5 表示：`0.5 * contrast_loss + 0.5 * (box + cls + dfl)`
+   - 训练结束时的对比损失权重
+   - 例如 0.5 表示：对比损失会乘以 0.5
 
 ## 使用示例
 
@@ -57,16 +55,16 @@ contrast_weight_final: 0.3  # 与 init 相同，保持恒定
 
 ```yaml
 contrast_weight: 1.0
-contrast_weight_init: 0.1   # 开始：10% contrast, 90% other
-contrast_weight_final: 0.5  # 结束：50% contrast, 50% other
+contrast_weight_init: 0.1   # 开始：对比损失 * 0.1
+contrast_weight_final: 0.5  # 结束：对比损失 * 0.5
 ```
 
 训练过程中的权重变化：
-- Epoch 0: 10% 对比损失
-- Epoch 25: 20% 对比损失
-- Epoch 50: 30% 对比损失
-- Epoch 75: 40% 对比损失
-- Epoch 100: 50% 对比损失
+- Epoch 0: 权重 = 0.1
+- Epoch 25: 权重 = 0.2
+- Epoch 50: 权重 = 0.3
+- Epoch 75: 权重 = 0.4
+- Epoch 100: 权重 = 0.5
 
 ### 示例 3：从高到低动态调整
 
@@ -74,8 +72,8 @@ contrast_weight_final: 0.5  # 结束：50% contrast, 50% other
 
 ```yaml
 contrast_weight: 1.0
-contrast_weight_init: 0.5   # 开始：50% contrast, 50% other
-contrast_weight_final: 0.1  # 结束：10% contrast, 90% other
+contrast_weight_init: 0.5   # 开始：对比损失 * 0.5
+contrast_weight_final: 0.1  # 结束：对比损失 * 0.1
 ```
 
 ## 训练命令示例
@@ -134,12 +132,16 @@ self.contrast_weight_final = getattr(self.hyp, 'contrast_weight_final', 0.1)
 ```python
 def update(self) -> None:
     """更新对比损失权重"""
+    # 只在 init != final 时应用动态调整
+    if self.contrast_weight_init == self.contrast_weight_final:
+        return  # 不需要动态调整
+
     self.updates += 1
     total_epochs = max(self.hyp.epochs - 1, 1)
     progress = min(self.updates / total_epochs, 1.0)
-    current_ratio = self.contrast_weight_init + \
+    current_weight = self.contrast_weight_init + \
         (self.contrast_weight_final - self.contrast_weight_init) * progress
-    self.contrast_ratio = current_ratio
+    self.contrast_weight_dynamic = current_weight
 ```
 
 ### 3. 损失计算
@@ -147,69 +149,38 @@ def update(self) -> None:
 在 `loss()` 方法中应用动态权重：
 
 ```python
-if hasattr(self, 'contrast_ratio'):
-    other_loss_sum = det_loss.sum()  # box + cls + dfl
-
-    # 计算动态权重以达到目标比例
-    target_weight = self.contrast_ratio / (1 - self.contrast_ratio)
-    dynamic_weight = target_weight * (other_loss_sum / contrast_loss)
-    loss[3] = contrast_loss * dynamic_weight
+if hasattr(self, 'contrast_weight_dynamic'):
+    # 使用动态调整的权重
+    loss[3] = contrast_loss * self.contrast_weight_dynamic
 else:
     # 没有动态调整，使用基础权重
     loss[3] = contrast_loss * self.contrast_weight
 ```
 
-## 公式推导
+## 公式说明
 
-目标：达到比例 `r = contrast / (contrast + other)`
+### 简化的线性插值
 
-设：
-- `L_c` = 原始对比损失
-- `L_o` = 其他损失总和（已加权的 box + cls + dfl）
-- `r` = 目标比例（如 0.1 表示 10%）
+动态权重使用简单的线性插值：
 
-我们希望：
 ```
-r * weighted_contrast = (1 - r) * L_o
+weight(epoch) = init + (final - init) * (epoch / total_epochs)
+weighted_contrast_loss = contrast_loss * weight(epoch)
 ```
 
-因此：
-```
-weighted_contrast = [(1 - r) / r] * L_o
-dynamic_weight = weighted_contrast / L_c = [(1 - r) / r] * (L_o / L_c)
-```
-
-验证：
-```
-final_contrast = L_c * dynamic_weight = [(1 - r) / r] * L_o
-total_loss = final_contrast + L_o = [(1 - r) / r] * L_o + L_o
-ratio = final_contrast / total_loss = [(1 - r) / r] * L_o / {[(1 - r) / r] * L_o + L_o}
-      = [(1 - r) / r] / {[(1 - r) / r] + 1}
-      = (1 - r) / [(1 - r) + r]
-      = (1 - r) / 1
-      = 1 - r  ❌
-
-正确推导：
-设 w 为权重因子，我们希望：
-```
-r = w * L_c / (w * L_c + L_o)
-```
-
-解得：
-```
-r * (w * L_c + L_o) = w * L_c
-r * w * L_c + r * L_o = w * L_c
-r * L_o = w * L_c * (1 - r)
-w = r * L_o / [L_c * (1 - r)]
-w = [r / (1 - r)] * (L_o / L_c)
-```
+例如：
+- `init = 0.1, final = 0.5, total_epochs = 100`
+- Epoch 0: `weight = 0.1 + (0.5 - 0.1) * 0 = 0.1`
+- Epoch 50: `weight = 0.1 + (0.5 - 0.1) * 0.5 = 0.3`
+- Epoch 100: `weight = 0.1 + (0.5 - 0.1) * 1.0 = 0.5`
 
 ## 注意事项
 
-1. **参数范围**：`contrast_weight_init` 和 `contrast_weight_final` 应在 0 到 1 之间
+1. **参数范围**：`contrast_weight_init` 和 `contrast_weight_final` 可以是任意正数
 2. **线性调整**：权重变化遵循线性插值，可以修改 `update()` 方法实现其他调度策略
 3. **自动集成**：无需修改训练代码，训练器会自动调用 `update()` 方法
 4. **兼容性**：如果不设置这些参数，系统会使用默认值，保持向后兼容
+5. **简化实现**：权重直接从 init 插值到 final，不涉及复杂的比例计算
 
 ## 监控和调试
 
@@ -217,8 +188,8 @@ w = [r / (1 - r)] * (L_o / L_c)
 
 ```python
 # 在训练循环中添加日志
-if hasattr(model.criterion, 'contrast_ratio'):
-    print(f"Epoch {epoch}: contrast_ratio = {model.criterion.contrast_ratio:.4f}")
+if hasattr(model.criterion, 'contrast_weight_dynamic'):
+    print(f"Epoch {epoch}: contrast_weight = {model.criterion.contrast_weight_dynamic:.4f}")
 ```
 
 ## 高级用法
@@ -231,16 +202,19 @@ if hasattr(model.criterion, 'contrast_ratio'):
 import math
 
 def update(self) -> None:
+    if self.contrast_weight_init == self.contrast_weight_final:
+        return
+
     self.updates += 1
     total_epochs = max(self.hyp.epochs - 1, 1)
     progress = min(self.updates / total_epochs, 1.0)
 
     # 余弦退火
     cos_progress = (1 - math.cos(progress * math.pi)) / 2
-    current_ratio = self.contrast_weight_init + \
+    current_weight = self.contrast_weight_init + \
         (self.contrast_weight_final - self.contrast_weight_init) * cos_progress
 
-    self.contrast_ratio = current_ratio
+    self.contrast_weight_dynamic = current_weight
 ```
 
 ## 总结
@@ -248,8 +222,9 @@ def update(self) -> None:
 此功能提供了灵活的对比损失权重管理：
 
 1. ✅ 将配置参数移到 YAML 文件中，方便修改
-2. ✅ 支持动态调整对比损失与其他损失的比例
+2. ✅ 支持从 init 到 final 的简单线性插值
 3. ✅ 自动集成到训练流程，无需修改训练代码
 4. ✅ 保持向后兼容，不影响现有功能
+5. ✅ 简化实现，去除复杂的比例计算
 
-使用此功能可以更好地平衡对比学习损失与检测损失，从而获得更好的训练效果。
+使用此功能可以更好地调整对比学习损失权重，从而获得更好的训练效果。
