@@ -106,6 +106,9 @@ pose: 12.0 # (float) pose loss gain (pose tasks)
 kobj: 1.0 # (float) keypoint objectness loss gain (pose tasks)
 rle: 1.0 # (float) rle loss gain (pose tasks)
 angle: 1.0 # (float) oriented angle loss gain (obb tasks)
+contrast_weight: 0.1 # (float) contrastive loss weight (contrastive learning tasks)
+contrast_weight_init: 0.1 # (float) initial contrast weight ratio (contrast / (contrast + other))
+contrast_weight_final: 0.1 # (float) final contrast weight ratio (contrast / (contrast + other))
 nbs: 64 # (int) nominal batch size used for loss normalization
 hsv_h: 0.015 # (float) HSV hue augmentation fraction
 hsv_s: 0.7 # (float) HSV saturation augmentation fraction
