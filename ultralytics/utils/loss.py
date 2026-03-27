@@ -641,7 +641,15 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
         over the course of training epochs.
 
         The weight is calculated to maintain the ratio: contrast_ratio * contrast_loss + (1-contrast_ratio) * other_loss
+
+        Note: If contrast_weight_init == contrast_weight_final, no dynamic adjustment is performed,
+        and the static contrast_weight is used (backward compatible with old behavior).
         """
+        # Only apply dynamic adjustment if init != final
+        # This ensures backward compatibility when all parameters are the same
+        if self.contrast_weight_init == self.contrast_weight_final:
+            return  # No dynamic adjustment needed, use static contrast_weight
+
         self.updates += 1
         # Calculate current ratio based on linear decay
         total_epochs = max(self.hyp.epochs - 1, 1)

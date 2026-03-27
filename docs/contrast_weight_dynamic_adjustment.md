@@ -4,6 +4,15 @@
 
 此功能将 `contrast_weight` 参数集成到 YAML 配置文件中，并实现了一种动态调整机制，可以在训练过程中逐步改变对比损失与其他损失的权重比例。
 
+## ⚠️ 重要：向后兼容性
+
+**当 `contrast_weight_init` 等于 `contrast_weight_final` 时，系统会自动使用静态权重（旧行为），保证向后兼容。**
+
+- 如果 `init == final`：使用简单的 `contrast_loss * contrast_weight` 计算（与旧版本相同）
+- 如果 `init != final`：使用动态调整公式，在训练过程中逐步改变权重比例
+
+这意味着即使设置了新参数，只要 init 和 final 相同，训练损失会和旧版本完全一致。
+
 ## 配置参数
 
 在 `ultralytics/cfg/default.yaml` 中添加了以下三个参数：
