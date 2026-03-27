@@ -540,7 +540,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
         if not contrast_feats:
             return torch.tensor(0.0, device=self.device)
 
-        total_contrast_loss = 0.0
+        total_contrast_loss = torch.tensor(0.0, device=self.device)
         batch_size = fg_mask.shape[0]
 
         # Process each feature map scale
@@ -550,6 +550,10 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
 
             # Normalize features
             feat_map = F.normalize(feat_map, dim=-1)
+
+            # Keep stride as tensor to avoid CPU-GPU sync
+            stride_val = self.stride[0]
+            feat_h, feat_w = h, w
 
             # For each image in batch
             for b in range(batch_size):
@@ -563,18 +567,14 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                 # Get unique GT indices for this image
                 gt_indices_b = target_gt_idx_b[fg_mask_b].unique()
 
-                # Compute feature map coordinates for this scale
-                stride_val = self.stride[0].item()  # Assume uniform stride per scale
-                feat_h, feat_w = h, w
-
                 # For each ground truth object, collect its foreground features
-                gt_features = []
+                gt_features_list = []
                 for gt_idx in gt_indices_b:
                     # Get all anchor indices assigned to this GT
                     anchor_mask = (target_gt_idx_b == gt_idx) & fg_mask_b
 
                     if anchor_mask.sum() > 0:
-                        # Map anchor indices to feature map coordinates
+                        # Map anchor indices to feature map coordinates (keep on GPU)
                         anchor_pts = anchor_points[anchor_mask]  # (N_assigned, 2)
                         feat_x = (anchor_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
                         feat_y = (anchor_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
@@ -582,54 +582,58 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
 
                         # Extract features for this GT object
                         gt_feat = feat_b[feat_indices]  # (N_assigned, c)
-                        gt_features.append(gt_feat.mean(dim=0, keepdim=True))  # (1, c)
+                        gt_features_list.append(gt_feat.mean(dim=0, keepdim=True))  # (1, c)
 
-                if len(gt_features) < 2:
+                if len(gt_features_list) < 2:
                     continue  # Need at least 2 objects for contrastive loss
 
                 # Stack all GT features
-                gt_features = torch.cat(gt_features, dim=0)  # (N_gt, c)
+                gt_features = torch.cat(gt_features_list, dim=0)  # (N_gt, c)
 
                 # Extract background features (not assigned to any GT)
                 bg_mask = ~fg_mask_b
                 if bg_mask.any():
-                    # Sample some background positions
-                    bg_indices = torch.where(bg_mask)[0]
-                    num_bg = min(len(bg_indices), len(gt_features) * 2)
+                    # Optimized background sampling - use nonzero instead of where
+                    bg_indices = torch.nonzero(bg_mask, as_tuple=True)[0]
+                    num_bg = min(bg_indices.shape[0], gt_features.shape[0] * 2)
                     if num_bg > 0:
-                        bg_sample_idx = bg_indices[torch.randperm(len(bg_indices), device=self.device)[:num_bg]]
+                        # Random sampling directly on GPU
+                        perm = torch.randperm(bg_indices.shape[0], device=self.device)[:num_bg]
+                        bg_sample_idx = bg_indices[perm]
                         bg_pts = anchor_points[bg_sample_idx]
                         bg_x = (bg_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
                         bg_y = (bg_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
                         bg_feat_indices = bg_y * feat_w + bg_x
                         bg_features = feat_b[bg_feat_indices]  # (N_bg, c)
 
-                        # Compute contrastive loss
-                        # Positive pairs: features from same object should be similar
-                        # Negative pairs: features from different objects and background should be dissimilar
-
-                        # InfoNCE-style loss for GT objects
+                        # Batch compute similarities for better GPU utilization
                         num_gt = gt_features.shape[0]
+
+                        # Compute all pairwise similarities at once
+                        pos_sim = torch.matmul(gt_features, gt_features.t()) / self.contrast_temp  # (num_gt, num_gt)
+                        pos_sim_diag = torch.diag(pos_sim).unsqueeze(1)  # (num_gt, 1)
+
+                        # Combine all negative features
+                        all_neg_feats = torch.cat([gt_features, bg_features], dim=0)  # (num_gt + num_bg, c)
+                        neg_sim = torch.matmul(gt_features, all_neg_feats.t()) / self.contrast_temp  # (num_gt, num_gt + num_bg)
+
+                        # Compute InfoNCE loss for each GT
                         for i in range(num_gt):
-                            anchor = gt_features[i:i+1]  # (1, c)
+                            # Create mask to exclude self-similarity
+                            mask = torch.ones(neg_sim.shape[1], dtype=torch.bool, device=self.device)
+                            mask[i] = False
 
-                            # Positive: same object (self)
-                            pos_sim = torch.matmul(anchor, anchor.t()) / self.contrast_temp
+                            # Positive: self-similarity
+                            pos = pos_sim_diag[i:i+1]  # (1, 1)
 
-                            # Negatives: other objects + background
-                            neg_feats = torch.cat([
-                                gt_features[torch.arange(num_gt) != i],
-                                bg_features
-                            ], dim=0)
+                            # Negatives: all others except self
+                            negs = neg_sim[i:i+1, mask]  # (1, num_gt + num_bg - 1)
 
-                            if neg_feats.shape[0] > 0:
-                                neg_sim = torch.matmul(anchor, neg_feats.t()) / self.contrast_temp  # (1, N_neg)
-
-                                # InfoNCE loss: -log(exp(pos) / (exp(pos) + sum(exp(neg))))
-                                logits = torch.cat([pos_sim, neg_sim], dim=1)  # (1, 1+N_neg)
-                                labels = torch.zeros(1, dtype=torch.long, device=self.device)
-                                loss = F.cross_entropy(logits, labels)
-                                total_contrast_loss += loss
+                            # InfoNCE loss: -log(exp(pos) / (exp(pos) + sum(exp(neg))))
+                            logits = torch.cat([pos, negs], dim=1)  # (1, num_gt + num_bg)
+                            labels = torch.zeros(1, dtype=torch.long, device=self.device)
+                            loss = F.cross_entropy(logits, labels, reduction='sum')
+                            total_contrast_loss = total_contrast_loss + loss
 
         return total_contrast_loss / max(batch_size, 1)
 
