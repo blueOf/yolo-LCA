@@ -5,7 +5,7 @@ import pynvml
 
 # 配置区域
 YAML_FILES = [
-    "ultralytics/cfg/models/dert/yolo11-detr-FusionBlock.yaml",
+    "ultralytics/cfg/models/11/yolo11-closs1.yaml",
     # 在此处添加更多 YAML 文件
 ]
 

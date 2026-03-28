@@ -4,9 +4,9 @@ import numpy as np
 from ultralytics import YOLO
 
 # model = YOLO("runs/train/yolo11-fast-dert-142/weights/best.pt")
-# model = YOLO("/home/nkq/yolo11/runs/train/yolo11/weights/best.pt")
+model = YOLO("/home/nkq/yolo11/runs/train/yolo11/weights/best.pt")
 # model = YOLO("runs/train/yolo11-sub_mean/weights/best.pt")
-model = YOLO("runs/train/neck_contrastive/neck_contrastive_epoch_300_yolo.pt")
+# model = YOLO("runs/train/neck_contrastive/neck_contrastive_epoch_300_yolo.pt")
 features = []
 
 
@@ -16,7 +16,7 @@ def hook_fn(module, input, output):
 
 
 # 注册到你想要的层（例如第 4 层）
-layer = 27
+layer = 16
 handle = model.model.model[layer].register_forward_hook(hook_fn)
 
 # 执行常规推理
@@ -53,13 +53,11 @@ _, C, H, W = feat.shape
 target_x, target_y = 42, 59  # 示例坐标 28, 57 竖直裂缝 42, 59 patch  20, 20树叶
 target_vec = feat[0, :, target_y, target_x].view(1, C, 1, 1)  # Shape: [1, 64, 1, 1]
 
-# 3. 计算余弦相似度
 similarity = torch.nn.functional.cosine_similarity(
     feat, target_vec, dim=1
 )  # Shape: [1, 80, 80]
 similarity = similarity.squeeze(0).cpu().numpy()
 
-# 4. 找到相似度前 10% 的阈值并生成掩码
 flattened_sim = similarity.flatten()
 threshold = np.percentile(flattened_sim, 100)  # 前 10% 即 90 百分位数
 max_val = flattened_sim.max()

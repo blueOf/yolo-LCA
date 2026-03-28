@@ -104,6 +104,9 @@ def main():
         # cls=1,
         # dfl=2,
         # mixup=0.1,
+        contrast_weight=0.2,
+        contrast_weight_init=0.2,
+        contrast_weight_final=0.5,
     )
 
 

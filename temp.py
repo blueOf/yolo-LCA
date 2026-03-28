@@ -1,19 +1,21 @@
-from ultralytics import YOLO
+n = int(input())
+opt = []
+for _ in range(n):
+    opt.append(list(map(int, input().split())))
 
-model = YOLO("runs/train/yolo11-fast-dert-142-submean/weights/best.pt")
+m = -1
+M = 10**9
 
-features = []
+qujian = []
+for i in range(n):
+    qujian.append((opt[i][0] // (opt[i][1] + 1), opt[i][0] // opt[i][1]))
+for i in range(n):
+    m = max(m, qujian[i][0])
+    M = min(M, qujian[i][1])
 
-
-def hook_fn(module, input, output):
-    # output 是原始特征图，不会被自动池化
-    features.append(output)
-
-
-# 注册到你想要的层（例如第 4 层）
-layer = 7
-handle = model.model.model[layer].register_forward_hook(hook_fn)
-
-model("test1.jpg")
-
-print(features[1])
+if m % 1 != 0:
+    m = int(m) + 1
+else:
+    m = int(m)
+M = int(M)
+print(m, M)
