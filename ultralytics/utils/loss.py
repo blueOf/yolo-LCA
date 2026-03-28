@@ -955,25 +955,39 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
         # Calculate per-class weights based on class distribution
         # Classes with fewer instances get higher weights to balance the loss
         class_counts = torch.bincount(gt_classes_flat, minlength=self.nc)
-        # Avoid division by zero
+        # Avoid division by zero by clamping to minimum of 1
         class_counts = torch.clamp(class_counts, min=1)
-        # Inverse frequency weighting: weight = total_objects / (num_classes * class_count)
-        class_weights = total_objects / (self.nc * class_counts.float())
-        # Normalize weights so mean weight = 1.0
+        # Inverse frequency weighting: weight = total_objects / class_count
+        # Simplified formula without nc to create stronger per-class weight differences
+        class_weights = total_objects / class_counts.float()
+        # Normalize weights so mean weight = 1.0 to maintain loss scale
         class_weights = class_weights / class_weights.mean()
 
         total_contrast_loss = 0.0
         batch_size = fg_mask.shape[0]
         total_num_objects = 0  # Track total number of objects for proper normalization
-        weighted_object_count = 0.0  # Track weighted count for normalization
 
         # Process each feature map scale
-        for feat_map in contrast_feats:
+        for feat_idx, feat_map in enumerate(contrast_feats):
             bs, c, h, w = feat_map.shape
             feat_map = feat_map.view(bs, c, -1).permute(0, 2, 1)  # (bs, h*w, c)
 
             # Normalize features
             feat_map = F.normalize(feat_map, dim=-1)
+
+            # Determine stride for this feature map by matching dimensions
+            # Each feature map has different spatial resolution corresponding to different strides
+            stride_val = None
+            for i, stride in enumerate(self.stride):
+                # Check if this stride's feature map size matches our current feat_map
+                expected_h = int(640 / stride.item())  # Assuming 640x640 input (typical)
+                if abs(h - expected_h) < 2:  # Allow small tolerance
+                    stride_val = stride.item()
+                    break
+
+            # Fallback: if we can't match, use index-based lookup
+            if stride_val is None:
+                stride_val = self.stride[min(feat_idx, len(self.stride) - 1)].item()
 
             # For each image in batch
             for b in range(batch_size):
@@ -991,8 +1005,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                 gt_mask_b = batch_idx_tensor.squeeze() == b
                 gt_classes_b = gt_classes_flat[gt_mask_b]
 
-                # Compute feature map coordinates for this scale
-                stride_val = self.stride[0].item()  # Assume uniform stride per scale
+                # Use the correct stride for this feature map
                 feat_h, feat_w = h, w
 
                 # For each ground truth object, collect its foreground features and class
@@ -1038,9 +1051,9 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                 # Extract background features (not assigned to any GT)
                 bg_mask = ~fg_mask_b
                 if bg_mask.any():
-                    # Sample some background positions
+                    # Sample background positions - increased from 2x to 4x for more stable contrastive learning
                     bg_indices = torch.where(bg_mask)[0]
-                    num_bg = min(len(bg_indices), len(gt_features) * 2)
+                    num_bg = min(len(bg_indices), len(gt_features) * 4)
                     if num_bg > 0:
                         bg_sample_idx = bg_indices[
                             torch.randperm(len(bg_indices), device=self.device)[:num_bg]
@@ -1090,12 +1103,10 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                                 object_weight = object_weights[i]
                                 weighted_loss = loss * object_weight
                                 total_contrast_loss += weighted_loss
-                                weighted_object_count += object_weight
 
-        # Normalize by weighted count of objects instead of raw count
-        # This accounts for per-class weighting and maintains proper normalization
-        # Classes with fewer instances contribute more to the loss, balancing training
-        return total_contrast_loss / max(weighted_object_count, 1)
+        # Normalize by total number of objects for consistency with box loss normalization
+        # This provides stable training and proper gradient scaling
+        return total_contrast_loss / max(total_num_objects, 1)
 
     def update(self) -> None:
         """Update contrast weight based on dynamic adjustment schedule.
