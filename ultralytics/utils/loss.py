@@ -939,13 +939,25 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
         if not contrast_feats:
             return torch.tensor(0.0, device=self.device)
 
+        # Handle empty gt_classes case (no ground truth objects in batch)
+        total_objects = gt_classes.shape[0]
+        if total_objects == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        # Validate class indices are within valid range [0, self.nc)
+        gt_classes_flat = gt_classes.squeeze().long()
+        if (gt_classes_flat < 0).any() or (gt_classes_flat >= self.nc).any():
+            # Clamp invalid class indices to valid range
+            gt_classes_flat = torch.clamp(gt_classes_flat, 0, self.nc - 1)
+            # Note: This could indicate a data issue that should be investigated
+            # but we handle it gracefully to prevent training crashes
+
         # Calculate per-class weights based on class distribution
         # Classes with fewer instances get higher weights to balance the loss
-        class_counts = torch.bincount(gt_classes.squeeze().long(), minlength=self.nc)
+        class_counts = torch.bincount(gt_classes_flat, minlength=self.nc)
         # Avoid division by zero
         class_counts = torch.clamp(class_counts, min=1)
         # Inverse frequency weighting: weight = total_objects / (num_classes * class_count)
-        total_objects = gt_classes.shape[0]
         class_weights = total_objects / (self.nc * class_counts.float())
         # Normalize weights so mean weight = 1.0
         class_weights = class_weights / class_weights.mean()
@@ -977,7 +989,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
 
                 # Get GT boxes and classes for this image
                 gt_mask_b = batch_idx_tensor.squeeze() == b
-                gt_classes_b = gt_classes[gt_mask_b].squeeze().long()
+                gt_classes_b = gt_classes_flat[gt_mask_b]
 
                 # Compute feature map coordinates for this scale
                 stride_val = self.stride[0].item()  # Assume uniform stride per scale
