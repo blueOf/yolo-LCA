@@ -909,6 +909,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
         stride_tensor: torch.Tensor,
         gt_bboxes: torch.Tensor,
         batch_idx_tensor: torch.Tensor,
+        gt_classes: torch.Tensor,
     ) -> torch.Tensor:
         """Compute contrastive loss for intermediate features.
 
@@ -920,6 +921,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
            - Pull features from the same object together
            - Push features from different objects apart
            - Push background features away from all foreground features
+        5. Applies per-class weighting based on class instance distribution to balance loss
 
         Args:
             contrast_feats (list[torch.Tensor]): List of feature maps for contrastive learning.
@@ -929,6 +931,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
             stride_tensor (torch.Tensor): Stride values for anchors (N_anchors, 1).
             gt_bboxes (torch.Tensor): Ground truth boxes in xyxy format (BS, N_gt, 4).
             batch_idx_tensor (torch.Tensor): Batch indices for ground truth boxes.
+            gt_classes (torch.Tensor): Class labels for each ground truth box (N_total_gt, 1).
 
         Returns:
             (torch.Tensor): Contrastive loss value.
@@ -936,9 +939,21 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
         if not contrast_feats:
             return torch.tensor(0.0, device=self.device)
 
+        # Calculate per-class weights based on class distribution
+        # Classes with fewer instances get higher weights to balance the loss
+        class_counts = torch.bincount(gt_classes.squeeze().long(), minlength=self.nc)
+        # Avoid division by zero
+        class_counts = torch.clamp(class_counts, min=1)
+        # Inverse frequency weighting: weight = total_objects / (num_classes * class_count)
+        total_objects = gt_classes.shape[0]
+        class_weights = total_objects / (self.nc * class_counts.float())
+        # Normalize weights so mean weight = 1.0
+        class_weights = class_weights / class_weights.mean()
+
         total_contrast_loss = 0.0
         batch_size = fg_mask.shape[0]
         total_num_objects = 0  # Track total number of objects for proper normalization
+        weighted_object_count = 0.0  # Track weighted count for normalization
 
         # Process each feature map scale
         for feat_map in contrast_feats:
@@ -960,12 +975,17 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                 # Get unique GT indices for this image
                 gt_indices_b = target_gt_idx_b[fg_mask_b].unique()
 
+                # Get GT boxes and classes for this image
+                gt_mask_b = batch_idx_tensor.squeeze() == b
+                gt_classes_b = gt_classes[gt_mask_b].squeeze().long()
+
                 # Compute feature map coordinates for this scale
                 stride_val = self.stride[0].item()  # Assume uniform stride per scale
                 feat_h, feat_w = h, w
 
-                # For each ground truth object, collect its foreground features
+                # For each ground truth object, collect its foreground features and class
                 gt_features = []
+                gt_object_classes = []  # Track class for each GT object
                 for gt_idx in gt_indices_b:
                     # Get all anchor indices assigned to this GT
                     anchor_mask = (target_gt_idx_b == gt_idx) & fg_mask_b
@@ -985,12 +1005,23 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                         gt_feat = feat_b[feat_indices]  # (N_assigned, c)
                         gt_features.append(gt_feat.mean(dim=0, keepdim=True))  # (1, c)
 
+                        # Track class for this GT object
+                        if gt_idx.item() < len(gt_classes_b):
+                            gt_object_classes.append(gt_classes_b[gt_idx.item()])
+                        else:
+                            # Fallback if index out of bounds
+                            gt_object_classes.append(torch.tensor(0, device=self.device))
+
                 if len(gt_features) < 2:
                     continue  # Need at least 2 objects for contrastive loss
 
-                # Stack all GT features
+                # Stack all GT features and convert classes to tensor
                 gt_features = torch.cat(gt_features, dim=0)  # (N_gt, c)
+                gt_object_classes = torch.stack(gt_object_classes)  # (N_gt,)
                 total_num_objects += gt_features.shape[0]  # Accumulate object count for normalization
+
+                # Get per-object weights based on their classes
+                object_weights = class_weights[gt_object_classes]  # (N_gt,)
 
                 # Extract background features (not assigned to any GT)
                 bg_mask = ~fg_mask_b
@@ -1012,7 +1043,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                         # Positive pairs: features from same object should be similar
                         # Negative pairs: features from different objects and background should be dissimilar
 
-                        # InfoNCE-style loss for GT objects
+                        # InfoNCE-style loss for GT objects with per-class weighting
                         num_gt = gt_features.shape[0]
                         for i in range(num_gt):
                             anchor = gt_features[i : i + 1]  # (1, c)
@@ -1042,12 +1073,17 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                                     1, dtype=torch.long, device=self.device
                                 )
                                 loss = F.cross_entropy(logits, labels)
-                                total_contrast_loss += loss
 
-        # Normalize by total number of objects instead of batch_size
-        # This makes the normalization consistent with box_loss (which normalizes by target_scores_sum)
-        # and prevents images with more objects from dominating the loss
-        return total_contrast_loss / max(total_num_objects, 1)
+                                # Apply per-object weight based on its class
+                                object_weight = object_weights[i]
+                                weighted_loss = loss * object_weight
+                                total_contrast_loss += weighted_loss
+                                weighted_object_count += object_weight
+
+        # Normalize by weighted count of objects instead of raw count
+        # This accounts for per-class weighting and maintains proper normalization
+        # Classes with fewer instances contribute more to the loss, balancing training
+        return total_contrast_loss / max(weighted_object_count, 1)
 
     def update(self) -> None:
         """Update contrast weight based on dynamic adjustment schedule.
@@ -1118,6 +1154,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                 stride_tensor,
                 batch["bboxes"].to(self.device),
                 batch_idx_tensor,
+                batch["cls"].to(self.device),  # Pass class labels for per-class weighting
             )
 
             # Apply dynamic weighting if dynamic weight is set (via update method)
