@@ -938,6 +938,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
 
         total_contrast_loss = 0.0
         batch_size = fg_mask.shape[0]
+        total_num_objects = 0  # Track total number of objects for proper normalization
 
         # Process each feature map scale
         for feat_map in contrast_feats:
@@ -989,6 +990,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
 
                 # Stack all GT features
                 gt_features = torch.cat(gt_features, dim=0)  # (N_gt, c)
+                total_num_objects += gt_features.shape[0]  # Accumulate object count for normalization
 
                 # Extract background features (not assigned to any GT)
                 bg_mask = ~fg_mask_b
@@ -1042,7 +1044,10 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                                 loss = F.cross_entropy(logits, labels)
                                 total_contrast_loss += loss
 
-        return total_contrast_loss / max(batch_size, 1)
+        # Normalize by total number of objects instead of batch_size
+        # This makes the normalization consistent with box_loss (which normalizes by target_scores_sum)
+        # and prevents images with more objects from dominating the loss
+        return total_contrast_loss / max(total_num_objects, 1)
 
     def update(self) -> None:
         """Update contrast weight based on dynamic adjustment schedule.
