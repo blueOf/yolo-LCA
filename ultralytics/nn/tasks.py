@@ -81,8 +81,9 @@ from ultralytics.nn.modules import (
     FastLocalDETRBlock,
     FusionBlock,
     SpatialMeanCenter,
-    LinearScaling,
+    res_sub,
 )
+
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
@@ -562,9 +563,15 @@ class DetectionModel(BaseModel):
         use_contrast = isinstance(head_module, ContrastDetect)
 
         if getattr(self, "end2end", False):
-            return E2ELoss(self, v8ContrastiveDetectionLoss if use_contrast else v8DetectionLoss)
+            return E2ELoss(
+                self, v8ContrastiveDetectionLoss if use_contrast else v8DetectionLoss
+            )
         else:
-            return v8ContrastiveDetectionLoss(self) if use_contrast else v8DetectionLoss(self)
+            return (
+                v8ContrastiveDetectionLoss(self)
+                if use_contrast
+                else v8DetectionLoss(self)
+            )
 
 
 class OBBModel(DetectionModel):
@@ -2023,6 +2030,10 @@ def parse_model(d, ch, verbose=True):
             if c4 is None:
                 c4 = [c1, c2_in, c3_in]
             args = [c1, c2_in, c3_in, c4, *args[1:]]
+        elif m is res_sub:
+            c1 = ch[f[0]]
+            c2 = ch[f[1]]
+            args = [c1, c2, *args]
 
         elif m in frozenset(
             {
@@ -2064,7 +2075,11 @@ def parse_model(d, ch, verbose=True):
             # Handle nested list format: [[[forward_indices], [contrast_indices]], 1, ContrastDetect, [nc]]
             # f should be a nested list: [[forward_indices], [contrast_indices]]
             forward_indices = f[0] if isinstance(f[0], list) else f
-            contrast_indices = f[1] if isinstance(f, list) and len(f) > 1 and isinstance(f[1], list) else []
+            contrast_indices = (
+                f[1]
+                if isinstance(f, list) and len(f) > 1 and isinstance(f[1], list)
+                else []
+            )
 
             # Build channel lists
             forward_ch = [ch[x] for x in forward_indices]
@@ -2075,7 +2090,9 @@ def parse_model(d, ch, verbose=True):
             m.legacy = legacy
 
             # For save list, need to flatten all indices
-            all_indices = forward_indices + (contrast_indices if contrast_indices else [])
+            all_indices = forward_indices + (
+                contrast_indices if contrast_indices else []
+            )
             f = all_indices  # Update f for save.extend later
             c2 = forward_ch[0]  # Output channel is from first forward layer
         elif m is v10Detect:

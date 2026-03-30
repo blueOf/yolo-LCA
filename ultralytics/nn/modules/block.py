@@ -61,6 +61,7 @@ __all__ = (
     "ConvWithAttention",
     "FusionBlock",
     "SpatialMeanCenter",
+    "res_sub",
 )
 
 
@@ -3098,11 +3099,13 @@ class SpatialMeanCenter(nn.Module):
         return x - x.mean(dim=(-2, -1), keepdim=True)
 
 
-class LinearScaling(nn.Module):
-    """Linearly scale each channel map to the [-10, 10] range."""
+class res_sub(nn.Module):
+    def __init__(self, c1, c2,c3=512):
+        super().__init__()
+        self.cv1 = Conv(c1, c3, 1)
+        self.cv2 = Conv(c2, c3, 1)
 
     def forward(self, x):
-        """Scale per-(B, C) minimum to -10 and maximum to 10."""
-        x = x - x.mean(dim=(-2, -1), keepdim=True)
-        m = abs(x).amax(dim=(-2, -1), keepdim=True)
-        return x * 5 / (m + 1e-6)
+        out = self.cv1(x[0]) + self.cv2(x[1])
+        """Apply per-(B, C) mean subtraction over H and W."""
+        return out - out.mean(dim=(-2, -1), keepdim=True)

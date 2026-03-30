@@ -6,7 +6,7 @@ from ultralytics import YOLO
 # model = YOLO("runs/train/yolo11-fast-dert-142/weights/best.pt")
 model = YOLO("/home/nkq/yolo11/runs/train/yolo11/weights/best.pt")
 # model = YOLO("runs/train/yolo11-sub_mean/weights/best.pt")
-# model = YOLO("runs/train/neck_contrastive/neck_contrastive_epoch_300_yolo.pt")
+# model = YOLO("runs/train/yolo11-fast-dert-142-clossv3-2/weights/best.pt")
 features = []
 
 
@@ -16,7 +16,7 @@ def hook_fn(module, input, output):
 
 
 # 注册到你想要的层（例如第 4 层）
-layer = 16
+layer = 19
 handle = model.model.model[layer].register_forward_hook(hook_fn)
 
 # 执行常规推理
@@ -50,7 +50,7 @@ _, C, H, W = feat.shape
 
 # 2. 指定坐标 (x, y)，提取对应的 64 维通道向量
 # 注意：在图像坐标系中，x 是列，y 是行
-target_x, target_y = 42, 59  # 示例坐标 28, 57 竖直裂缝 42, 59 patch  20, 20树叶
+target_x, target_y = 14, 28  # 示例坐标 28, 57 竖直裂缝 42, 59 patch  20, 20树叶
 target_vec = feat[0, :, target_y, target_x].view(1, C, 1, 1)  # Shape: [1, 64, 1, 1]
 
 similarity = torch.nn.functional.cosine_similarity(

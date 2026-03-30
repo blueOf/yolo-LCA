@@ -67,7 +67,7 @@ from .block import (
     FastLocalDETRBlock,
     FusionBlock,
     SpatialMeanCenter,
-    LinearScaling,
+    res_sub,
 )
 from .conv import (
     CBAM,
