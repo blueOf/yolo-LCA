@@ -1198,6 +1198,18 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
            - Push background features away from all foreground features
         5. Applies per-class weighting based on class instance distribution to balance loss
 
+        **IMPORTANT - Floor Rounding for Coordinate Mapping:**
+        When mapping anchor point coordinates to feature map indices, we use torch.floor()
+        to round DOWN instead of rounding up (ceil). This is critical because:
+        - Floor rounding ensures we only extract features WITHIN the bbox boundaries
+        - Ceil rounding would include features at the next pixel, potentially pulling in
+          background features outside the object boundaries
+        - This prevents background contamination in the foreground feature representation
+
+        Example: For anchor at (10.7, 15.3) with stride 8:
+        - floor(10.7/8) = floor(1.3375) = 1  (correct, stays within bbox)
+        - ceil(10.7/8) = ceil(1.3375) = 2    (wrong, might go outside bbox)
+
         Args:
             contrast_feats (list[torch.Tensor]): List of feature maps for contrastive learning.
             fg_mask (torch.Tensor): Foreground mask indicating positive anchors (BS, N_anchors).
@@ -1279,12 +1291,14 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
 
                     if anchor_mask.sum() > 0:
                         # Map anchor indices to feature map coordinates
+                        # Use floor() to round DOWN, preventing background contamination at bbox edges
+                        # Ceil would round UP and could include background features beyond the bbox
                         anchor_pts = anchor_points[anchor_mask]  # (N_assigned, 2)
                         feat_x = (
-                            (anchor_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
+                            torch.floor(anchor_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
                         )
                         feat_y = (
-                            (anchor_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
+                            torch.floor(anchor_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
                         )
                         feat_indices = feat_y * feat_w + feat_x
 
@@ -1325,8 +1339,10 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                             torch.randperm(len(bg_indices), device=self.device)[:num_bg]
                         ]
                         bg_pts = anchor_points[bg_sample_idx]
-                        bg_x = (bg_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
-                        bg_y = (bg_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
+                        # Use floor() to round DOWN for background features as well
+                        # This ensures consistent coordinate mapping with foreground features
+                        bg_x = torch.floor(bg_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
+                        bg_y = torch.floor(bg_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
                         bg_feat_indices = bg_y * feat_w + bg_x
                         bg_features = feat_b[bg_feat_indices]  # (N_bg, c)
 
