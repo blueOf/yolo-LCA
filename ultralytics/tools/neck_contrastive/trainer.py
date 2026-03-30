@@ -157,8 +157,8 @@ class NeckContrastiveLoss(torch.nn.Module):
                 for box, c in zip(xyxy, cls_i):
                     x1 = int(torch.floor(box[0] * w).item())
                     y1 = int(torch.floor(box[1] * h).item())
-                    x2 = int(torch.ceil(box[2] * w).item()) - 1
-                    y2 = int(torch.ceil(box[3] * h).item()) - 1
+                    x2 = int(torch.floor(box[2] * w).item())
+                    y2 = int(torch.floor(box[3] * h).item())
                     x1 = min(max(x1, 0), w - 1)
                     y1 = min(max(y1, 0), h - 1)
                     x2 = min(max(x2, x1), w - 1)
