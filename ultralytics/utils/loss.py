@@ -1280,11 +1280,14 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                     if anchor_mask.sum() > 0:
                         # Map anchor indices to feature map coordinates
                         anchor_pts = anchor_points[anchor_mask]  # (N_assigned, 2)
+                        # Use round() instead of long() to map to nearest feature map pixel
+                        # This ensures coordinates map to the pixel closest to box center
+                        # Example: 159/80=1.9875 -> round()=2 (not floor()=1)
                         feat_x = (
-                            (anchor_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
+                            torch.round(anchor_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
                         )
                         feat_y = (
-                            (anchor_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
+                            torch.round(anchor_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
                         )
                         feat_indices = feat_y * feat_w + feat_x
 
@@ -1325,8 +1328,9 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
                             torch.randperm(len(bg_indices), device=self.device)[:num_bg]
                         ]
                         bg_pts = anchor_points[bg_sample_idx]
-                        bg_x = (bg_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
-                        bg_y = (bg_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
+                        # Use round() instead of long() to map to nearest feature map pixel
+                        bg_x = torch.round(bg_pts[:, 0] / stride_val).long().clamp(0, feat_w - 1)
+                        bg_y = torch.round(bg_pts[:, 1] / stride_val).long().clamp(0, feat_h - 1)
                         bg_feat_indices = bg_y * feat_w + bg_x
                         bg_features = feat_b[bg_feat_indices]  # (N_bg, c)
 
