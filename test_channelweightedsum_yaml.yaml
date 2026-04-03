@@ -1,0 +1,21 @@
+# Test configuration for ChannelWeightedSum module
+# This is a minimal test YAML to verify the module integrates correctly
+
+nc: 80  # number of classes
+scales:
+  n: [0.33, 0.25, 1024]
+
+# Minimal backbone for testing
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]]       # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]]      # 1-P2/4
+  - [-1, 1, Conv, [256, 3, 2]]      # 2-P3/8
+  - [-1, 1, ChannelWeightedSum, []] # 3 - Test ChannelWeightedSum (maintains 256 channels)
+  - [-1, 1, Conv, [512, 3, 2]]      # 4-P4/16
+  - [-1, 1, ChannelWeightedSum, []] # 5 - Test ChannelWeightedSum (maintains 512 channels)
+
+# Minimal head for testing
+head:
+  - [-1, 1, Conv, [512, 1, 1]]      # 6
+  - [[2, 4, 6], 1, Detect, [nc]]    # 7 - Detect head

@@ -62,6 +62,7 @@ __all__ = (
     "FusionBlock",
     "SpatialMeanCenter",
     "FastLocalDETRBlock",
+    "ChannelWeightedSum",
 )
 
 
@@ -3109,3 +3110,52 @@ class res_sub(nn.Module):
         out = self.cv1(x[0]) + self.cv2(x[1])
         """Apply per-(B, C) mean subtraction over H and W."""
         return out - out.mean(dim=(-2, -1), keepdim=True)
+
+
+class ChannelWeightedSum(nn.Module):
+    """
+    Custom module that performs channel-wise weighted sum using a learnable C×C weight matrix.
+
+    For input x with shape (B, C, W, H):
+    1. Reshape to (B, H*W, 1, C)
+    2. Multiply with learnable weight matrix (C, C) to get weighted sum
+    3. Reshape back to (B, C, W, H)
+
+    This module maintains the same number of channels (no c2 parameter).
+    """
+
+    def __init__(self, c1):
+        """
+        Initialize ChannelWeightedSum module.
+
+        Args:
+            c1 (int): Number of input channels (also output channels).
+        """
+        super().__init__()
+        self.channels = c1
+        # Learnable weight matrix of shape (C, C)
+        self.weight = nn.Parameter(torch.randn(c1, c1) * 0.01)
+
+    def forward(self, x):
+        """
+        Forward pass through ChannelWeightedSum.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, C, W, H)
+
+        Returns:
+            torch.Tensor: Output tensor of shape (B, C, W, H)
+        """
+        B, C, W, H = x.shape
+
+        # Reshape to (B, H*W, 1, C)
+        x_reshaped = x.permute(0, 2, 3, 1).reshape(B, H * W, 1, C)
+
+        # Perform matrix multiplication: (B, H*W, 1, C) @ (C, C) = (B, H*W, 1, C)
+        # We need to compute weighted sum for each spatial position
+        x_weighted = torch.matmul(x_reshaped, self.weight)
+
+        # Reshape back to (B, C, W, H)
+        x_output = x_weighted.reshape(B, H, W, C).permute(0, 3, 1, 2)
+
+        return x_output

@@ -82,6 +82,7 @@ from ultralytics.nn.modules import (
     FusionBlock,
     SpatialMeanCenter,
     res_sub,
+    ChannelWeightedSum,
 )
 
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
@@ -2116,6 +2117,11 @@ def parse_model(d, ch, verbose=True):
             if c2 != nc:
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             args = [c1, c2, *args[1:]]
+        elif m is ChannelWeightedSum:
+            # ChannelWeightedSum maintains input channels (no c2 parameter)
+            c1 = ch[f]
+            c2 = c1  # Output channels = input channels
+            args = [c1]  # Only needs c1 parameter
         else:
             c2 = ch[f]
 
