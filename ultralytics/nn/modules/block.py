@@ -61,7 +61,7 @@ __all__ = (
     "ConvWithAttention",
     "FusionBlock",
     "SpatialMeanCenter",
-    "res_sub",
+    "FastLocalDETRBlock",
 )
 
 
@@ -3100,7 +3100,7 @@ class SpatialMeanCenter(nn.Module):
 
 
 class res_sub(nn.Module):
-    def __init__(self, c1, c2,c3=512):
+    def __init__(self, c1, c2, c3=512):
         super().__init__()
         self.cv1 = Conv(c1, c3, 1)
         self.cv2 = Conv(c2, c3, 1)

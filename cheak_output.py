@@ -4,9 +4,9 @@ import numpy as np
 from ultralytics import YOLO
 
 # model = YOLO("runs/train/yolo11-fast-dert-142/weights/best.pt")
-model = YOLO("/home/nkq/yolo11/runs/train/yolo11/weights/best.pt")
+# model = YOLO("/home/nkq/yolo11/runs/train/yolo11/weights/best.pt")
 # model = YOLO("runs/train/yolo11-sub_mean/weights/best.pt")
-# model = YOLO("runs/train/yolo11-fast-dert-142-clossv3-2/weights/best.pt")
+model = YOLO("runs/train/yolo11-fast-dert-142-clossv3-2/weights/best.pt")
 features = []
 
 
@@ -16,11 +16,11 @@ def hook_fn(module, input, output):
 
 
 # 注册到你想要的层（例如第 4 层）
-layer = 19
+layer = 4
 handle = model.model.model[layer].register_forward_hook(hook_fn)
 
 # 执行常规推理
-img_path = "test1.jpg"
+img_path = "test2.jpg"
 model(img_path)
 
 # 1. 提取特征图
@@ -50,7 +50,7 @@ _, C, H, W = feat.shape
 
 # 2. 指定坐标 (x, y)，提取对应的 64 维通道向量
 # 注意：在图像坐标系中，x 是列，y 是行
-target_x, target_y = 14, 28  # 示例坐标 28, 57 竖直裂缝 42, 59 patch  20, 20树叶
+target_x, target_y = 40, 50  # 示例坐标 28, 57 竖直裂缝 42, 59 patch  20, 20树叶
 target_vec = feat[0, :, target_y, target_x].view(1, C, 1, 1)  # Shape: [1, 64, 1, 1]
 
 similarity = torch.nn.functional.cosine_similarity(
@@ -59,7 +59,7 @@ similarity = torch.nn.functional.cosine_similarity(
 similarity = similarity.squeeze(0).cpu().numpy()
 
 flattened_sim = similarity.flatten()
-threshold = np.percentile(flattened_sim, 100)  # 前 10% 即 90 百分位数
+threshold = np.percentile(flattened_sim, 0)  # 前 10% 即 90 百分位数
 max_val = flattened_sim.max()
 mask = (similarity >= threshold).astype(np.uint8) * 255
 
@@ -74,7 +74,7 @@ cv2.imwrite("similarity_mask.png", mask)
 # 这样可以让原本在 0.9x 附近的差异更明显
 stretched_sim = np.clip((similarity - threshold) / (max_val - threshold + 1e-8), 0, 1)
 sim_norm = (stretched_sim * 255).astype(np.uint8)
-sim_norm = cv2.normalize(similarity, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+# sim_norm = cv2.normalize(similarity, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
 heatmap = cv2.applyColorMap(sim_norm, cv2.COLORMAP_JET)
 cv2.imwrite("similarity_heatmap.png", heatmap)

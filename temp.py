@@ -1,15 +1,15 @@
-import math
+from ultralytics.nn.tasks import temporary_modules
+from ultralytics import YOLO
 
-n = int(input())
-nums = list(map(int, input().split()))
+# 1. 定义映射关系：{"旧路径": "新路径"}
+# 假设你将模块名从 MyOldModule 改为了 MyNewModule
+mapping = {
+    "ultralytics.nn.modules.block.FastLocalDETRBlock": "ultralytics.nn.modules.block.FastLocalDETRBlock"
+}
 
-a = [nums[i] - nums[n - 1 - i] for i in range(math.ceil(n / 2))]
-ans = 0
-for i in range(len(a) - 1):
-    ans += abs(a[i])
-    if a[i + 1] * a[i] > 0:
-        if abs(a[i]) > abs(a[i + 1]):
-            a[i + 1] = 0
-        else:
-            a[i + 1] -= a[i]
-print(ans + abs(a[-1]))
+with temporary_modules(modules=mapping):
+    # 2. 在上下文管理器中加载模型
+    model = YOLO("runs/train/yolo11-fast-dert-142-clossv3-2/weights/best.pt")
+
+    # 3. 重新保存，保存后的文件将使用新的模块名
+    model.save("runs/train/yolo11-fast-dert-142-clossv3-2/weights/best-2.pt")
