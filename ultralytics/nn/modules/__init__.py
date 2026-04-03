@@ -68,6 +68,7 @@ from .block import (
     FusionBlock,
     SpatialMeanCenter,
     res_sub,
+    ChannelWeightedSum,
 )
 from .conv import (
     CBAM,
