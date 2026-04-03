@@ -115,6 +115,10 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
+from .custom_backprop import (
+    CustomBackpropModule,
+    FloorFractionalIndexing,
+)
 
 __all__ = (
     "AIFI",
@@ -158,11 +162,13 @@ __all__ = (
     "Conv",
     "Conv2",
     "ConvTranspose",
+    "CustomBackpropModule",
     "DWConv",
     "DWConvTranspose2d",
     "DeformableTransformerDecoder",
     "DeformableTransformerDecoderLayer",
     "Detect",
+    "FloorFractionalIndexing",
     "Focus",
     "GhostBottleneck",
     "GhostConv",
