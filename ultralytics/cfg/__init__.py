@@ -160,6 +160,8 @@ CFG_FLOAT_KEYS = frozenset(
         "workspace",
         "batch",
         "contrast_weight",
+        "contrast_weight_init",
+        "contrast_weight_final",
     }
 )
 CFG_FRACTION_KEYS = frozenset(
@@ -188,8 +190,6 @@ CFG_FRACTION_KEYS = frozenset(
         "iou",
         "fraction",
         "multi_scale",
-        "contrast_weight_init",
-        "contrast_weight_final",
     }
 )
 CFG_INT_KEYS = frozenset(
