@@ -142,6 +142,24 @@ class DetectionTrainer(BaseTrainer):
         # self.args.box *= 3 / nl  # scale to layers
         # self.args.cls *= self.data["nc"] / 80 * 3 / nl  # scale to classes and layers
         # self.args.cls *= (self.args.imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
+
+        # Merge model YAML hyperparameters into self.args (for DDP compatibility)
+        # Model YAML can contain training hyperparameters (e.g., contrast_weight, contrast_weight_init, contrast_weight_final)
+        # These need to be transferred to self.args before attaching to model
+        from ultralytics.cfg import CFG_FLOAT_KEYS, CFG_FRACTION_KEYS, CFG_INT_KEYS, CFG_BOOL_KEYS
+
+        if hasattr(self.model, 'yaml') and isinstance(self.model.yaml, dict):
+            # Get all valid hyperparameter keys
+            valid_keys = CFG_FLOAT_KEYS | CFG_FRACTION_KEYS | CFG_INT_KEYS | CFG_BOOL_KEYS
+
+            # Merge model YAML hyperparameters into self.args if not already set
+            for key in valid_keys:
+                if key in self.model.yaml:
+                    # Only override if not already set in training args or if it's the default value
+                    if not hasattr(self.args, key) or getattr(self.args, key) == getattr(DEFAULT_CFG, key, None):
+                        setattr(self.args, key, self.model.yaml[key])
+                        LOGGER.info(f"Using model YAML hyperparameter: {key}={self.model.yaml[key]}")
+
         self.model.nc = self.data["nc"]  # attach number of classes to model
         self.model.names = self.data["names"]  # attach class names to model
         self.model.args = self.args  # attach hyperparameters to model
