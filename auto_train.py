@@ -5,7 +5,7 @@ import pynvml
 
 # 配置区域
 YAML_FILES = [
-    "ultralytics/cfg/models/11/yolo11-closs1.yaml",
+    "ultralytics/cfg/models/dert/yolo11-fast-dert-142-clossv3.yaml",
     # 在此处添加更多 YAML 文件
 ]
 
@@ -65,7 +65,7 @@ def main():
                 # 窗口名称包含 GPU ID 和模型文件名，方便查看
                 if os.environ.get("TMUX"):
                     window_name = f"GPU{gpu}_{os.path.basename(yaml_file)}"
-                    shell_cmd = f"python train.py {yaml_file} --device={gpu} --patience=300; read -p 'Task Finished. Press enter to close...'"
+                    shell_cmd = f"python train.py {yaml_file} --device={gpu} --patience=50 --epochs=300 --yaml_file=/home/nkq/yolo11/datasets/coco2017/coco.yaml; read -p 'Task Finished. Press enter to close...'"
                     cmd = ["tmux", "new-window", "-n", window_name, shell_cmd]
                 else:
                     # 如果不在 tmux 中，回退到普通子进程模式

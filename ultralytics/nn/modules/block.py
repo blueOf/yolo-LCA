@@ -2768,7 +2768,6 @@ class FastLocalDETRBlock(nn.Module):
         self.input_norm = LayerNorm2d(c)
         self.proj = nn.Conv(c, cout, 1) if c != cout else nn.Identity()
 
-        # 核心点：用 1x1 卷积代替 Linear，并放在最前面
         self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
 
         self.layers = nn.ModuleList(

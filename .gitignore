@@ -5,3 +5,8 @@ runs/
 datasets/
 __pycache__/
 *.pyc
+
+Japan/
+Czech/
+United_States/
+India/

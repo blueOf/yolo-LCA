@@ -43,7 +43,8 @@ urls = [
     #'http://images.cocodataset.org/zips/train2017.zip',
     #'http://images.cocodataset.org/zips/val2017.zip',
     #'http://images.cocodataset.org/zips/test2017.zip',
-    "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+    # "https://bigdatacup.s3.ap-northeast-1.amazonaws.com/2022/CRDDC2022/RDD2022/RDD2022.zip"
+    "https://bigdatacup.s3.ap-northeast-1.amazonaws.com/2022/CRDDC2022/RDD2022/Country_Specific_Data_CRDDC2022/RDD2022_Norway.zip"
 ]
 
 for url in urls:
