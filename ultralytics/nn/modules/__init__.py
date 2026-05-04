@@ -62,12 +62,11 @@ from .block import (
     NonLocalBlockND,
     C2PSA_1,
     CKAS_DAF,
-    FastLocalDETR,
-    ConvWithAttention,
     FastLocalDETRBlock,
     FusionBlock,
     SpatialMeanCenter,
     res_sub,
+    JustPlus,
 )
 from .conv import (
     CBAM,

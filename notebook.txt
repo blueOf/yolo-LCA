@@ -216,17 +216,6 @@ FastLocalDETRBlockv2  版本性能很差 可以舍弃
 2.微调100轮
 3.重新训练
 
-4.X.1 方法的普适性验证 (Method Universality across Diverse Geographies)
-这里写您最初的想法：日本训日本测、印度训印度测、美国训美国测。
-
-学术话术： “为了证明 YOLO-SLA 架构并非在单一数据集（如 SVRDD）上过拟合，我们在 RDD2022 的三个具代表性的国家子集（日本、印度、美国）上分别从头训练了模型。实验表明，即便面对印度严重老化的路面或美国特有的标线系统，YOLO-SLA 依然在同源测试集上全面超越了基线 YOLOv11n。这证实了 SLA 模块与 IBCL 损失作为一种底层架构增强策略，具有卓越的地理普适性（Geographical Universality）。”
-
-4.X.2 零样本跨域泛化 (Zero-Shot Cross-Domain Generalization)
-这里写用日本权重去测印度和美国（只做推理）。
-
-学术话术： “在实际部署中，模型往往需要面对未参与训练的全新城市路网。为此，我们进一步开展了严苛的跨国交叉验证（Cross-National Validation Matrix）。具体而言，我们将仅在日本子集上训练收敛的模型权重，直接用于印度和美国测试集的零样本推理（Zero-shot Inference）。如表 X 所示，尽管存在巨大的域偏移（Domain Shift），得益于 IBCL 损失对病害本质物理特征与特定国家背景噪声的有效解耦，YOLO-SLA 在跨域测试中的性能衰减幅度显著低于基线模型。这有力地证明了本模型具备优异的领域泛化（Domain Generalization）能力。”
-
-
 
 ---------------------------------
 在已经训练结束的模型基础上，训练一个新的neck，
@@ -239,9 +228,9 @@ FastLocalDETRBlockv2  版本性能很差 可以舍弃
 
 延伸注意力，顺着block自行决定延申方向
 
+阶梯性对比损失
 
-修改了ultralytics/utils/metrics.py 中的 0.1 if conf in {None, 0.01 if is_obb else 0.001} else conf  原始0.25
-对于未来valid画图部分和矩阵有影响，对于指标没有
+
 
 
 常用指令
@@ -249,4 +238,5 @@ ps -p 1068630 -o pid,ppid,uid,stat,cmd
 
 watch -n0.1 nvidia-smi
 watch -n0.1 mpstat -P ALL 1 1
+
 

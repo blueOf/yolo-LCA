@@ -1220,7 +1220,7 @@ class v8ContrastiveDetectionLoss(v8DetectionLoss):
             return torch.tensor(0.0, device=self.device)
 
         # Validate class indices are within valid range [0, self.nc)
-        gt_classes_flat = gt_classes.squeeze().long()
+        gt_classes_flat = gt_classes.view(-1).long()
         if (gt_classes_flat < 0).any() or (gt_classes_flat >= self.nc).any():
             # Clamp invalid class indices to valid range
             gt_classes_flat = torch.clamp(gt_classes_flat, 0, self.nc - 1)

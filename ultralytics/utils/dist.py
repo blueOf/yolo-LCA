@@ -51,10 +51,14 @@ def generate_ddp_file(trainer: BaseTrainer) -> str:
         - Model path configuration
         - Training initialization code
     """
-    module, name = f"{trainer.__class__.__module__}.{trainer.__class__.__name__}".rsplit(".", 1)
+    module, name = (
+        f"{trainer.__class__.__module__}.{trainer.__class__.__name__}".rsplit(".", 1)
+    )
 
     content = f"""
 # Ultralytics Multi-GPU training temp file (should be automatically deleted after use)
+import sys
+sys.path.insert(0, {str(sys.path[0])!r})
 from pathlib import Path, PosixPath  # For model arguments stored as Path instead of str
 overrides = {vars(trainer.args)}
 

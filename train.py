@@ -15,8 +15,8 @@ def parse_args():
     )
     p.add_argument(
         "--device",
-        type=int,
-        default=None,
+        type=list,
+        default=[0, 1],
         help="GPU 设备编号（整数），不指定则自动选择 CPU/GPU（None）",
     )
     p.add_argument("--epochs", type=int, default=800, help="训练总轮数（默认：800）")
@@ -104,9 +104,9 @@ def main():
         # cls=1,
         # dfl=2,
         # mixup=0.1,
-        contrast_weight=2,
-        contrast_weight_init=2,
-        contrast_weight_final=2,
+        contrast_weight=5,
+        contrast_weight_init=5,
+        contrast_weight_final=5,
     )
 
 

@@ -56,12 +56,10 @@ __all__ = (
     "NonLocalBlockND",
     "C2PSA_1",
     "CKAS_DAF",
-    "FastLocalDETR_PE",
-    "FastLocalDETR",
-    "ConvWithAttention",
     "FusionBlock",
     "SpatialMeanCenter",
     "FastLocalDETRBlock",
+    "JustPlus",
 )
 
 
@@ -2663,97 +2661,6 @@ class RealNVP(nn.Module):
         return self.prior.log_prob(z) + log_det
 
 
-class FastLocalDETR(nn.Module):
-    def __init__(self, c, cout, sight=2, head_num=4, N=1):
-        super().__init__()
-        self.c, self.cout, self.sight, self.head_num, self.N = (
-            c,
-            cout,
-            sight,
-            head_num,
-            N,
-        )
-        self.kernel_size = 2 * sight + 1
-        self.input_norm = nn.LayerNorm(c)
-        self.proj = nn.Linear(c, cout) if c != cout else nn.Identity()
-
-        # 核心点：用 1x1 卷积代替 Linear，并放在最前面
-        self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=sight)
-
-        self.layers = nn.ModuleList(
-            [
-                nn.ModuleDict(
-                    {
-                        "qkv_conv": nn.Conv2d(c, 3 * c, 1),  # 一次性完成邻居的 QKV
-                        "norm_sa": nn.LayerNorm(c),
-                        "q_center": nn.Linear(c, c),
-                        "norm_ca": nn.LayerNorm(c),
-                        "ffn": nn.Sequential(
-                            nn.Linear(c, c * 4), nn.GELU(), nn.Linear(c * 4, c)
-                        ),
-                        "norm_ffn": nn.LayerNorm(c),
-                    }
-                )
-                for _ in range(N)
-            ]
-        )
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        ks, Np = self.kernel_size, self.kernel_size**2
-
-        # 1. Norm 依然需要
-        x = (
-            self.input_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
-        )  # (B, C, H, W)
-
-        center_x = x.flatten(2).transpose(1, 2)  # (B, L, C)
-
-        for layer in self.layers:
-            # 核心优化：单次 Unfold，直接处理 QKV
-            qkv = layer["qkv_conv"](x)  # (B, 3C, H, W)
-            # 一次映射 + 一次滑动窗口 = 最小显存开销
-            qkv_nb = self.unfold(qkv).view(B, 3, C, Np, H * W)
-            q_nb = qkv_nb[:, 0].permute(0, 3, 1, 2).reshape(-1, Np, C)  # (B*L, Np, C)
-            k_nb = qkv_nb[:, 1].permute(0, 3, 1, 2).reshape(-1, Np, C)
-            v_nb = qkv_nb[:, 2].permute(0, 3, 1, 2).reshape(-1, Np, C)
-
-            # --- SA ---
-            q_nb = q_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )  # (B*L, Np,head_num，C//head_num) -> (B*L, head_num, Np, C//head_num)
-            k_nb = k_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            attn = (q_nb @ k_nb.transpose(-2, -1)) * ((C // self.head_num) ** -0.5)
-
-            attn = F.softmax(attn, dim=-1)
-
-            v_nb = v_nb.view(-1, Np, self.head_num, C // self.head_num).transpose(1, 2)
-            nb_encoded = (attn @ v_nb).transpose(1, 2).reshape(-1, Np, C)
-            nb_encoded = layer["norm_sa"](nb_encoded)  # 这里简化了残差以测试速度
-
-            # --- CA ---
-            qc = (
-                layer["q_center"](center_x)
-                .view(-1, 1, self.head_num, C // self.head_num)
-                .transpose(1, 2)
-            )
-            kc = nb_encoded.view(-1, Np, self.head_num, C // self.head_num).transpose(
-                1, 2
-            )
-            vc = kc  # 简化演示
-
-            attn_c = F.softmax((qc @ kc.transpose(-2, -1)) * (C**-0.5), dim=-1)
-            ca_out = (attn_c @ vc).transpose(1, 2).reshape(B, H * W, C)
-
-            center_x = layer["norm_ca"](center_x + ca_out)
-            center_x = layer["norm_ffn"](center_x + layer["ffn"](center_x))
-
-            if self.N > 1:
-                x = center_x.transpose(1, 2).view(B, C, H, W).contiguous()
-
-        return self.proj(center_x).transpose(1, 2).view(B, self.cout, H, W)
-
-
 class FastLocalDETRBlock(nn.Module):
     def __init__(self, c, cout, sight=2, head_num=4, N=1):
         super().__init__()
@@ -2833,155 +2740,6 @@ class FastLocalDETRBlock(nn.Module):
 
         return self.proj(center_x)
 
-
-class ConvWithAttention(nn.Module):
-    """
-    Implementation of a module that performs convolution to generate K and V,
-    then uses the original input as Q to perform dot-product attention.
-    - N: Number of repeated layers
-    - size: Kernel size for the convolution
-    - Maintains the same spatial dimensions for KV.
-    """
-
-    def __init__(self, c1, c2, n=1, size=3):
-        super().__init__()
-        self.c1 = c1
-        self.c2 = (
-            c2  # Reserved for YOLO architecture compatibility, but output stays c1
-        )
-        self.n = n
-        self.size = size
-        self.padding = size // 2
-
-        self.norm_kv = nn.InstanceNorm2d(c1, affine=True)
-        self.norm_q = nn.InstanceNorm2d(c1, affine=True)
-
-        # Encoder: Convolutional layers to generate context (K, V)
-        self.encoder = nn.ModuleList(
-            [
-                nn.ModuleDict(
-                    {
-                        "conv": Conv(c1, c1, size, p=self.padding),
-                    }
-                )
-                for _ in range(n)
-            ]
-        )
-
-    def forward(self, x):
-        """
-        Forward pass for ConvWithAttention.
-        x: (B, c1, H, W)
-        """
-        B, C, H, W = x.shape
-
-        # 1. Decoder input Q (Normalized original input)
-        q = self.norm_q(x)  # (B, C, H, W)
-
-        # 2. Encoder processing (Generating context K, V)
-        context = x
-        for layer in self.encoder:
-            context = self.norm_kv(layer["conv"](context))  # (B, C, H, W)
-
-        # K and V are derived from the same encoder context
-        k = v = context  # (B, C, H, W)
-
-        # 3. Decoder Attention: x_c dot context_c (Pointwise across channels)
-        # Reshape for dot product: (B, C, HW)
-        q_flat = q.view(B, C, -1)  # (B, C, L)
-        k_flat = k.view(B, C, -1)  # (B, C, L)
-        v_flat = v.view(B, C, -1)  # (B, C, L)
-
-        # (B, C, L, 1) @ (B, C, 1, L) -> (B, C, L, L)
-        attn = torch.matmul(q_flat.unsqueeze(-1), k_flat.unsqueeze(-2)) * (C**-0.5)
-        attn = F.softmax(attn, dim=-1)  # (B, C, L, L)
-
-        # (B, C, L, L) @ (B, C, L, 1) -> (B, C, L, 1)
-        out = torch.matmul(attn, v_flat.unsqueeze(-1)).squeeze(-1)  # (B, C, L)
-
-        return out.view(B, C, H, W)
-
-
-class ConvWithAttention(nn.Module):
-    """
-    Implementation of a module that performs convolution to generate K and V,
-    then uses the original input as Q to perform dot-product attention.
-    - N: Number of repeated layers
-    - size: Kernel size for the convolution
-    - Maintains the same spatial dimensions for KV.
-    """
-
-    def __init__(self, c1, c2, n=1, size=3, head_num=4):
-        super().__init__()
-        self.c1 = c1
-        self.c2 = (
-            c2  # Reserved for YOLO architecture compatibility, but output stays c1
-        )
-        self.n = n
-        self.size = size
-        self.padding = size // 2
-        self.head_num = head_num
-        self.head_dim = c1 // head_num
-        assert (
-            c1 % head_num == 0
-        ), f"c1 ({c1}) must be divisible by head_num ({head_num})"
-
-        self.norm_q = nn.InstanceNorm2d(c1, affine=True)
-        # self.norm_o = nn.InstanceNorm2d(c1, affine=True)
-        # Encoder: Convolutional layers to generate context (K, V)
-        self.encoder = nn.ModuleList(
-            [
-                nn.ModuleDict(
-                    {
-                        "conv": Conv(c1, c1, size, p=self.padding),
-                    }
-                )
-            ]
-        )
-
-        # Decoder Projections
-        self.decoder_layers = nn.ModuleList(
-            [
-                nn.ModuleDict(
-                    {
-                        "proj": Conv(c1, c1, 1, act=False),
-                    }
-                )
-                for _ in range(n)
-            ]
-        )
-
-    def forward(self, x):
-        """
-        Forward pass for ConvWithAttention.
-        x: (B, c1, H, W)
-        """
-        B, C, H, W = x.shape
-        L = H * W
-
-        # 1. Encoder processing (Generating context K, V)
-        # We process the entire encoder first to get the final context
-        context = self.norm_q(x)
-        for layer in self.encoder:
-            context = layer["conv"](context)  # (B, C, H, W)
-
-        # 2. Decoder processing (N repeated steps like Transformer)
-        # Using the original normalized x as the initial query-side input
-        res = x
-        for layer in self.decoder_layers:
-            # Normalize and Project Q
-            q = layer["proj"](self.norm_q(res))  # (B, C, H, W)
-            kv = layer["proj"](context)  # (B, C, H, W)
-            k = v = kv
-
-            attn_weight = (q * k) * (self.head_dim**-0.5)
-            attn_weight = torch.sigmoid(attn_weight)
-
-            out = attn_weight * v
-            # res = out
-            res = res + out
-
-        return res
 
 
 import math
@@ -3108,3 +2866,41 @@ class res_sub(nn.Module):
         out = self.cv1(x[0]) + self.cv2(x[1])
         """Apply per-(B, C) mean subtraction over H and W."""
         return out - out.mean(dim=(-2, -1), keepdim=True)
+
+
+class JustPlus(nn.Module):
+    """JustPlus: Spatial downsampling by summing 2×2 patch pixels.
+
+    Groups every 2×2 square of the feature map, sums their values, and reduces
+    spatial resolution by a factor of 2.  For example, an input of shape
+    (B, C, 80, 80) produces an output of shape (B, c2, 40, 40).
+
+    Args:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        k (int): Spatial reduction factor (patch size). Default is 2.
+    """
+
+    def __init__(self, c1: int, c2: int, k: int = 2):
+        super().__init__()
+        self.c1 = c1
+        self.c2 = c2
+        self.k = k
+        # Optional 1×1 conv to adjust channel count after spatial reduction
+        self.conv = Conv(c1, c2, 1, 1, act=False) if c1 != c2 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply 2×2 patch sum downsampling and optional channel projection.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, C, H, W).
+
+        Returns:
+            (torch.Tensor): Downsampled tensor of shape (B, c2, H//k, W//k).
+        """
+        k = self.k
+        B, C, H, W = x.shape
+        x = F.pixel_unshuffle(x, k)  # (B, C*k^2, H/k, W/k)
+        x = x.view(B, C, k * k, H // k, W // k).sum(dim=2)  # (B, C, H/k, W/k)
+        return self.conv(x)
+    

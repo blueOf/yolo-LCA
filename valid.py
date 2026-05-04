@@ -43,8 +43,8 @@ def validate_on_svrdd(model, save_dir, device="0"):
     print(f"模型信息: {model_summary}\n")
 
     # SVRDD test 数据集配置文件路径
-    yaml_file = "datasets/RDD2022_YOLO_India/dataset_test.yaml"
-    # yaml_file = "/home/nkq/yolo26/datasets/SVRDD/svrdd_test.yaml"
+    yaml_file = "datasets/RDD2022_YOLO_Japan/dataset_test.yaml"
+    yaml_file = "/home/nkq/yolo26/datasets/SVRDD/svrdd_test.yaml"
     # 验证
     print("正在开始验证...")
     f = io.StringIO()
@@ -60,7 +60,7 @@ def validate_on_svrdd(model, save_dir, device="0"):
             plots=True,
             verbose=True,
             # batch=1,
-            # visualize=True,
+            #visualize=True,
             # conf=0.25,
             # iou=0.6,
         )

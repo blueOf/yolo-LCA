@@ -76,12 +76,11 @@ from ultralytics.nn.modules import (
     NonLocalBlockND,
     C2PSA_1,
     CKAS_DAF,
-    FastLocalDETR,
-    ConvWithAttention,
     FastLocalDETRBlock,
     FusionBlock,
     SpatialMeanCenter,
     res_sub,
+    JustPlus,
 )
 
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
@@ -1938,9 +1937,8 @@ def parse_model(d, ch, verbose=True):
             A2C2f,
             C2PSA_1,
             CKAS_DAF,
-            FastLocalDETR,
-            ConvWithAttention,
             FastLocalDETRBlock,
+            JustPlus,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
