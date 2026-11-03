@@ -159,6 +159,9 @@ CFG_FLOAT_KEYS = frozenset(
         "time",
         "workspace",
         "batch",
+        "contrast_weight",
+        "contrast_weight_init",
+        "contrast_weight_final",
     }
 )
 CFG_FRACTION_KEYS = frozenset(
